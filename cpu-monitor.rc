@@ -1,0 +1,19 @@
+#include <windows.h>
+
+#define IDD_ABOUT 101
+#define IDC_WEBSITE 102
+
+// About Dialog
+IDD_ABOUT DIALOGEX 0, 0, 180, 100
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About CPU Usage Monitor"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "CPU Usage per Core v1.2.0", -1, 10, 10, 160, 10
+    LTEXT           "Monitor CPU usage in system tray", -1, 10, 25, 160, 10
+    LTEXT           "Built with MinGW", -1, 10, 40, 160, 10
+    LTEXT           "Visit our website", IDC_WEBSITE, 10, 55, 160, 10, SS_NOTIFY
+    DEFPUSHBUTTON   "OK", IDOK, 65, 75, 50, 14
+END
+
+IDI_ICON1 ICON "cpu-monitor.ico"
