@@ -1,6 +1,6 @@
 # CPU and Memory Monitor
 
-This repository contains two system tray applications written in Go:
+This repository contains two system tray applications written in C:
 - **CPU Monitor**: Displays CPU usage per core and updates a bar chart icon in the system tray.
 
 
