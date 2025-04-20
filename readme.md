@@ -1,6 +1,6 @@
 # CPU and Memory Monitor
 
-This repository contains two system tray applications written in C:
+This repository contains two system tray applications written in Go:
 - **CPU Monitor**: Displays CPU usage per core and updates a bar chart icon in the system tray.
 
 
@@ -9,9 +9,9 @@ This repository contains two system tray applications written in C:
   ![CPU tooltip](images/cpu_icon_tooltip.png "CPU monitor systray icon with CPU usage")
 
 
-  CPU monitor systray icon with menu:
+  CPU / mem monitor systray icon with menu:
 
- ![CPU menu](images/cpu_menu.png "CPU monitor systray icon with menu")
+ ![menu](images/menu.png "CPU / mem monitor systray icon with menu")
 
 - **Memory Monitor**: Displays memory usage statistics and updates a pie chart icon in the system tray.
 
@@ -20,21 +20,14 @@ This repository contains two system tray applications written in C:
 
   ![Memory tooltip](images/mem_tooltip.png "Mem monitor systray icon with Mem usage")
 
-  Mem monitor systray icon with details menu:
-
-  ![Mem menu](images/mem_menu.png "Mem monitor systray icon with details menu")
-
-
 ## Build Windows
 
 To build and run the applications on macOS:
 
 ```sh
-# Build CPU Monitor
-\mingw32\bin\gcc -ffunction-sections -fdata-sections -s -o cpu-monitor cpu-monitor.c cpu-monitor_res.o -lpdh -mwindows -lwinmm -Wl,--gc-sections -static-libgcc
-
-# Build Memory Monitor
-\mingw32\bin\gcc -ffunction-sections -fdata-sections -s -o mem-monitor mem-monitor.c mem-monitor_res.o -lpdh -mwindows -lwinmm -Wl,--gc-sections -static-libgcc
+# Build Resource Monitor
+\mingw32\bin\windres resource-monitor.rc -o resource-monitor_res.o
+\mingw32\bin\gcc -ffunction-sections -fdata-sections -s -o resource-monitor resource-monitor.c resource-monitor_res.o -lpdh -mwindows -lwinmm -Wl,--gc-sections -static-libgcc -municode
 ```
 
 ## Features
