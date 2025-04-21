@@ -122,19 +122,19 @@ static LANG lang_de = {
 };
 
 static LANG lang_it = {
-    _T("Informazioni su Resource Monitor"),
-    _T("Usato: %u MB"),
-    _T("Libero: %u MB"),
-    _T("In cache: %u MB"),
-    _T("Swap: %u MB"),
-    _T("CPU %d: %.2f%%"),
-    _T("Avvia all'avvio del sistema"),
-    _T("Lingua"),
+    _T("Info su Resource Monitor"),
+    _T("Memoria Usata: %u MB"),
+    _T("Memoria libera: %u MB"),
+    _T("Memoria cache: %u MB"),
+    _T("Memoria swap: %u MB"),
+    _T("Uso CPU %d: %.2f%%"),
+    _T("Esegui all'avvio del sistema"),
+    _T("Lingua interfaccia"),
     _T("Esci"),
-    _T("Utilizzo della memoria: %.1f%%"),
-    _T("Media CPU: %.1f%%"),
-    _T("Mostra icona memoria"),
-    _T("Mostra icona CPU")
+    _T("Uso memoria: %.1f%%"),
+    _T("Uso medio CPU: %.1f%%"),
+    _T("Visualizza icona memoria"),
+    _T("Visualizza icona CPU")
 };
 
 static LANG lang_es = {
