@@ -123,7 +123,7 @@ static LANG lang_de = {
 
 static LANG lang_it = {
     _T("Info su Resource Monitor"),
-    _T("Memoria Usata: %u MB"),
+    _T("Memoria usata: %u MB"),
     _T("Memoria libera: %u MB"),
     _T("Memoria cache: %u MB"),
     _T("Memoria swap: %u MB"),
