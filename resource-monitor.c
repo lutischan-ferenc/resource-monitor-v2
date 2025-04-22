@@ -198,7 +198,7 @@ void InitializeMenuWithIcons(void);
 void CleanupMenuIcons(void);
 HBITMAP CreateColorBitmap(COLORREF color, int width, int height);
 void SaveLanguageSelectionToRegistry(void);
-void LoadLanguageSelectionFromRegistry(void);
+BOOL LoadLanguageSelectionFromRegistry(void);
 void RefreshMenuText(void);
 BOOL IsAutoStartEnabled(void);
 void SetAutoStart(BOOL enable);
@@ -644,13 +644,13 @@ void SaveLanguageSelectionToRegistry(void) {
 }
 
 // Loads the selected language from the registry
-void LoadLanguageSelectionFromRegistry(void) {
+BOOL LoadLanguageSelectionFromRegistry(void) {
     HKEY hKey;
-    g_lang = &lang_en;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD langId, dataSize = sizeof(DWORD);
         if (RegQueryValueEx(hKey, _T("Language"), NULL, NULL, (LPBYTE)&langId, &dataSize) == ERROR_SUCCESS) {
             switch (langId) {
+                case ID_MENU_LANG_EN: g_lang = &lang_en; break;
                 case ID_MENU_LANG_HU: g_lang = &lang_hu; break;
                 case ID_MENU_LANG_DE: g_lang = &lang_de; break;
                 case ID_MENU_LANG_IT: g_lang = &lang_it; break;
@@ -659,9 +659,12 @@ void LoadLanguageSelectionFromRegistry(void) {
                 case ID_MENU_LANG_RU: g_lang = &lang_ru; break;
                 default: g_lang = &lang_en; break;
             }
+            RegCloseKey(hKey);
+            return TRUE;
         }
         RegCloseKey(hKey);
     }
+    return FALSE;
 }
 
 // Refreshes menu text with current language
@@ -947,6 +950,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // Application entry point
 int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow) {
+    HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, _T("ResourceMonitorEvent"));
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBox(NULL, _T("The program is already running. Exiting."), _T("Warning"), MB_OK | MB_ICONWARNING);
+        return 0;
+    }
+
     g_hInst = hInstance;
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
@@ -1043,13 +1052,25 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
         Sleep(100);
     }
 
-    // Load settings
+    if (!LoadLanguageSelectionFromRegistry()) {
+        LANGID langId = GetUserDefaultUILanguage();
+        switch (langId) {
+            case 0x0409: g_lang = &lang_en; break;
+            case 0x040e: g_lang = &lang_hu; break;
+            case 0x0407: g_lang = &lang_de; break;
+            case 0x0410: g_lang = &lang_it; break;
+            case 0x0c0a: g_lang = &lang_es; break;
+            case 0x040c: g_lang = &lang_fr; break;
+            case 0x0419: g_lang = &lang_ru; break;
+            default: g_lang = &lang_en; break;
+        }
+    }
+
     g_autoStartChecked = IsAutoStartEnabled();
     if (!g_autoStartChecked) {
         g_autoStartChecked = TRUE;
         SetAutoStart(TRUE);
     }
-    LoadLanguageSelectionFromRegistry();
     LoadMenuStateFromRegistry();
     RefreshMenuText();
     UpdateIconVisibility();
