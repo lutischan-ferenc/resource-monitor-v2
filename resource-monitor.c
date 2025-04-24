@@ -513,7 +513,7 @@ void UpdateCpuInfo(CPUINFO *ci) {
 // Checks if CPU usage has changed significantly
 BOOL CpuUsageChanged(CPUINFO *ci) {
     for (int i = 0; i < ci->core_count; i++) {
-        if (fabs(ci->percents[i] - g_lastPercents[i]) > 5.0) return TRUE;
+        if (fabs(ci->percents[i] - g_lastPercents[i]) > 1.5) return TRUE;
     }
     return FALSE;
 }
