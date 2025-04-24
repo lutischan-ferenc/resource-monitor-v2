@@ -559,7 +559,7 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     PatBlt(hdcMask, 0, 0, imgWidth, imgHeight, WHITENESS);
 
     for (int i = 0; i < numGroups; i++) {
-        int barHeight = (int)(groupPercents[i] * imgHeight / 100.0);
+        int barHeight = max(1, (int)(groupPercents[i] * imgHeight / 100.0));
         int xStart = i * barWidth;
         int xEnd = xStart + barWidth;
 
