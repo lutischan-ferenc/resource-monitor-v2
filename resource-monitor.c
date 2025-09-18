@@ -864,7 +864,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
                     return TRUE;
                 } 
                 if (LOWORD(wParam) == IDC_COFFEE) {
-                    ShellExecute(NULL, _T("open"), _T("https://www.buymeacoffee.com/lutischan"), NULL, NULL, SW_SHOWNORMAL);
+                    ShellExecute(NULL, _T("open"), _T("https://www.buymeacoffee.com/lutischanf"), NULL, NULL, SW_SHOWNORMAL);
                     return TRUE;
                 }
             }
