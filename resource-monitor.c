@@ -8,6 +8,7 @@
 #include <strsafe.h>
 #include <winreg.h>
 #include <math.h>
+#include <commctrl.h>
 
 #pragma comment(lib, "pdh.lib")
 
@@ -20,6 +21,11 @@
 #define ID_MENU_SWAP 104
 #define IDD_ABOUT 105
 #define IDC_WEBSITE 106
+#define IDD_REFRESH_INTERVAL 107
+#define IDC_COFFEE 108
+#define IDC_SLIDER_REFRESH_INTERVAL 1002
+#define IDC_STATIC_REFRESH_VALUE 1003
+#define IDC_STATIC_REFRESH_LABEL 1004
 #define ID_MENU_CPU_BASE 200
 #define ID_MENU_AUTOSTART 300
 #define ID_MENU_LANGUAGE 301
@@ -30,6 +36,7 @@
 #define ID_MENU_LANG_ES 306
 #define ID_MENU_LANG_FR 307
 #define ID_MENU_LANG_RU 308
+#define ID_MENU_REFRESH_INTERVAL 309
 #define ID_MENU_EXIT 400
 #define ID_MENU_SHOW_MEMORY_ICON 500
 #define ID_MENU_SHOW_CPU_ICON 501
@@ -70,6 +77,9 @@ typedef struct {
     TCHAR tooltip_cpu_avg[64];
     TCHAR menu_show_memory_icon[64];
     TCHAR menu_show_cpu_icon[64];
+    TCHAR menu_refresh_interval[64];
+    TCHAR dialog_refresh_title[64];
+    TCHAR dialog_refresh_label[64];
 } LANG;
 
 // Localization data
@@ -86,7 +96,10 @@ static LANG lang_en = {
     _T("Memory Usage: %.1f%%"),
     _T("CPU Avg: %.1f%%"),
     _T("Show Memory Icon"),
-    _T("Show CPU Icon")
+    _T("Show CPU Icon"),
+    _T("Refresh Interval..."),
+    _T("Refresh Interval"),
+    _T("Refresh interval:"),
 };
 
 static LANG lang_hu = {
@@ -102,7 +115,10 @@ static LANG lang_hu = {
     _T("Memóriahasználat: %.1f%%"),
     _T("CPU Átlag: %.1f%%"),
     _T("Memória ikon megjelenítése"),
-    _T("CPU ikon megjelenítése")
+    _T("CPU ikon megjelenítése"),
+    _T("Frissítési idő..."),
+    _T("Frissítési idő"),
+    _T("Frissítési intervallum:"),
 };
 
 static LANG lang_de = {
@@ -118,7 +134,10 @@ static LANG lang_de = {
     _T("Speichernutzung: %.1f%%"),
     _T("CPU Durchschnitt: %.1f%%"),
     _T("Speicher-Symbol anzeigen"),
-    _T("CPU-Symbol anzeigen")
+    _T("CPU-Symbol anzeigen"),
+    _T("Aktualisierungsintervall..."),
+    _T("Aktualisierungsintervall"),
+    _T("Aktualisierungsintervall:"),
 };
 
 static LANG lang_it = {
@@ -134,7 +153,10 @@ static LANG lang_it = {
     _T("Uso memoria: %.1f%%"),
     _T("Uso medio CPU: %.1f%%"),
     _T("Visualizza icona memoria"),
-    _T("Visualizza icona CPU")
+    _T("Visualizza icona CPU"),
+    _T("Intervallo di aggiornamento..."),
+    _T("Intervallo di aggiornamento"),
+    _T("Intervallo di aggiornamento:"),
 };
 
 static LANG lang_es = {
@@ -150,7 +172,10 @@ static LANG lang_es = {
     _T("Uso de memoria: %.1f%%"),
     _T("Promedio CPU: %.1f%%"),
     _T("Mostrar icono de memoria"),
-    _T("Mostrar icono de CPU")
+    _T("Mostrar icono de CPU"),
+    _T("Intervalo de actualización..."),
+    _T("Intervalo de actualización"),
+    _T("Intervalo de actualización:"),
 };
 
 static LANG lang_fr = {
@@ -166,7 +191,10 @@ static LANG lang_fr = {
     _T("Utilisation de la mémoire: %.1f%%"),
     _T("Moyenne CPU: %.1f%%"),
     _T("Afficher l'icône de mémoire"),
-    _T("Afficher l'icône de CPU")
+    _T("Afficher l'icône de CPU"),
+    _T("Intervalle de rafraîchissement..."),
+    _T("Intervalle de rafraîchissement"),
+    _T("Intervalle de rafraîchissement:"),
 };
 
 static LANG lang_ru = {
@@ -182,7 +210,10 @@ static LANG lang_ru = {
     _T("Использование памяти: %.1f%%"),
     _T("Средняя загрузка CPU: %.1f%%"),
     _T("Показать значок памяти"),
-    _T("Показать значок CPU")
+    _T("Показать значок CPU"),
+    _T("Интервал обновления..."),
+    _T("Интервал обновления"),
+    _T("Интервал обновления:"),
 };
 
 // Function prototypes
@@ -205,7 +236,10 @@ void SetAutoStart(BOOL enable);
 void UpdateIconVisibility(void);
 void SaveMenuStateToRegistry(void);
 void LoadMenuStateFromRegistry(void);
+void SaveRefreshIntervalToRegistry(void);
+void LoadRefreshIntervalFromRegistry(void);
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void ShowAboutDialog(HWND hwndParent);
 
 // Global variables
@@ -221,6 +255,7 @@ static HBITMAP g_hBmpFree;
 static HICON g_hIconMemory;
 static HICON g_hIconCpu;
 static BOOL g_autoStartChecked;
+static DWORD g_refreshInterval = 1000;
 static DWORDLONG g_lastUsedMB;
 static double g_lastPercents[MAX_CORES];
 static PDH_HQUERY g_pdhQueryMemory;
@@ -676,6 +711,7 @@ void RefreshMenuText(void) {
         ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
     ModifyMenu(g_hMenu, ID_MENU_SHOW_CPU_ICON, MF_BYCOMMAND | MF_STRING | (g_showCpuIcon ? MF_CHECKED : 0),
         ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
+    ModifyMenu(g_hMenu, ID_MENU_REFRESH_INTERVAL, MF_BYCOMMAND | MF_STRING, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
     ModifyMenu(g_hMenu, ID_MENU_EXIT, MF_BYCOMMAND | MF_STRING, ID_MENU_EXIT, g_lang->menu_exit);
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_EN, MF_BYCOMMAND | (g_lang == &lang_en ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_DE, MF_BYCOMMAND | (g_lang == &lang_de ? MF_CHECKED : MF_UNCHECKED));
@@ -759,6 +795,25 @@ void LoadMenuStateFromRegistry(void) {
     }
 }
 
+// Saves the refresh interval to the registry
+void SaveRefreshIntervalToRegistry(void) {
+    HKEY hKey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueEx(hKey, _T("RefreshInterval"), 0, REG_DWORD, (const BYTE *)&g_refreshInterval, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+// Loads the refresh interval from the registry
+void LoadRefreshIntervalFromRegistry(void) {
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, _T("RefreshInterval"), NULL, NULL, (LPBYTE)&g_refreshInterval, &dataSize);
+        RegCloseKey(hKey);
+    }
+}
+
 // Show about dialog
 void ShowAboutDialog(HWND hwndParent) {
     DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUT), hwndParent, AboutDlgProc);
@@ -771,21 +826,16 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
 
     switch (uMsg) {
         case WM_INITDIALOG: {
-            // Create underlined font for link
-            HFONT hFont = (HFONT)SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_GETFONT, 0, 0);
-            LOGFONTW lf;
-            GetObjectW(hFont, sizeof(LOGFONTW), &lf);
+            HFONT hFont = (HFONT)SendDlgItemMessage(hwndDlg, IDC_WEBSITE, WM_GETFONT, 0, 0);
+            LOGFONT lf;
+            GetObject(hFont, sizeof(LOGFONT), &lf);
             lf.lfUnderline = TRUE;
-            hLinkFont = CreateFontIndirectW(&lf);
-            SendDlgItemMessageW(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)hLinkFont, TRUE);
+            hLinkFont = CreateFontIndirect(&lf);
+            SendDlgItemMessage(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
+            SendDlgItemMessage(hwndDlg, IDC_COFFEE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
 
-            // Set link text
-            SetDlgItemTextW(hwndDlg, IDC_WEBSITE, L"Visit our website");
-
-            // Create brush for WM_CTLCOLORSTATIC
             hBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
 
-            // Center dialog on screen
             RECT rect;
             GetWindowRect(hwndDlg, &rect);
             int dlgWidth = rect.right - rect.left;
@@ -796,9 +846,11 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
             return TRUE;
         }
         case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wParam;
             HWND hwndStatic = (HWND)lParam;
-            if (GetDlgCtrlID(hwndStatic) == IDC_WEBSITE) {
-                HDC hdc = (HDC)wParam;
+            int ctrlId = GetDlgCtrlID(hwndStatic);
+
+            if (ctrlId == IDC_WEBSITE || ctrlId == IDC_COFFEE) {
                 SetTextColor(hdc, RGB(0, 0, 255));
                 SetBkMode(hdc, TRANSPARENT);
                 return (LRESULT)hBrush;
@@ -806,40 +858,79 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
             break;
         }
         case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_WEBSITE && HIWORD(wParam) == STN_CLICKED) {
-                ShellExecuteW(NULL, L"open", L"https://github.com/lutischan-ferenc/resource-monitor-v2", NULL, NULL, SW_SHOWNORMAL);
-                return TRUE;
+            if (HIWORD(wParam) == STN_CLICKED) {
+                 if (LOWORD(wParam) == IDC_WEBSITE) {
+                    ShellExecute(NULL, _T("open"), _T("https://github.com/lutischan-ferenc/resource-monitor-v2"), NULL, NULL, SW_SHOWNORMAL);
+                    return TRUE;
+                } 
+                if (LOWORD(wParam) == IDC_COFFEE) {
+                    ShellExecute(NULL, _T("open"), _T("https://www.buymeacoffee.com/lutischan"), NULL, NULL, SW_SHOWNORMAL);
+                    return TRUE;
+                }
             }
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-                // Clean up resources and close dialog
-                if (hLinkFont) {
-                    DeleteObject(hLinkFont);
-                    hLinkFont = NULL;
-                }
-                if (hBrush) {
-                    DeleteObject(hBrush);
-                    hBrush = NULL;
-                }
+                if (hLinkFont) DeleteObject(hLinkFont);
+                if (hBrush) DeleteObject(hBrush);
                 EndDialog(hwndDlg, LOWORD(wParam));
                 return TRUE;
             }
             break;
         case WM_DESTROY:
         case WM_CLOSE:
-            // Clean up resources
-            if (hLinkFont) {
-                DeleteObject(hLinkFont);
-                hLinkFont = NULL;
-            }
-            if (hBrush) {
-                DeleteObject(hBrush);
-                hBrush = NULL;
-            }
-            
-            if (uMsg == WM_CLOSE)
-                EndDialog(hwndDlg, IDCANCEL);
-                
+            if (hLinkFont) DeleteObject(hLinkFont);
+            if (hBrush) DeleteObject(hBrush);
+            if (uMsg == WM_CLOSE) EndDialog(hwndDlg, IDCANCEL);
             return TRUE;
+    }
+    return FALSE;
+}
+
+// Refresh interval dialog procedure
+INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_INITDIALOG: {
+            SetWindowText(hwndDlg, g_lang->dialog_refresh_title);
+            SetDlgItemText(hwndDlg, IDC_STATIC_REFRESH_LABEL, g_lang->dialog_refresh_label);
+
+            HWND hSlider = GetDlgItem(hwndDlg, IDC_SLIDER_REFRESH_INTERVAL);
+            // Range: 500ms to 5000ms, in 250ms steps. (5000-500)/250 = 18 steps.
+            SendMessage(hSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(0, 18));
+            SendMessage(hSlider, TBM_SETPAGESIZE, 0, (LPARAM)1);
+
+            int pos = (g_refreshInterval - 500) / 250;
+            SendMessage(hSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)pos);
+
+            TCHAR buf[32];
+            StringCchPrintf(buf, 32, _T("%d ms"), g_refreshInterval);
+            SetDlgItemText(hwndDlg, IDC_STATIC_REFRESH_VALUE, buf);
+            return TRUE;
+        }
+        case WM_HSCROLL: {
+            HWND hSlider = (HWND)lParam;
+            if (GetDlgCtrlID(hSlider) == IDC_SLIDER_REFRESH_INTERVAL) {
+                int pos = SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                int value = 500 + pos * 250;
+                TCHAR buf[32];
+                StringCchPrintf(buf, 32, _T("%d ms"), value);
+                SetDlgItemText(hwndDlg, IDC_STATIC_REFRESH_VALUE, buf);
+            }
+            break;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK) {
+                HWND hSlider = GetDlgItem(hwndDlg, IDC_SLIDER_REFRESH_INTERVAL);
+                int pos = SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                g_refreshInterval = 500 + pos * 250;
+                SetTimer(g_hWnd, 1, g_refreshInterval, NULL);
+                SaveRefreshIntervalToRegistry();
+                EndDialog(hwndDlg, LOWORD(wParam));
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDCANCEL) {
+                EndDialog(hwndDlg, LOWORD(wParam));
+                return TRUE;
+            }
+            break;
     }
     return FALSE;
 }
@@ -851,7 +942,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     switch (msg) {
     case WM_CREATE:
-        SetTimer(hWnd, 1, 1000, NULL);
+        g_hWnd = hWnd;
+        LoadRefreshIntervalFromRegistry();
+        SetTimer(hWnd, 1, g_refreshInterval, NULL);
         break;
 
     case WM_TIMER:
@@ -874,6 +967,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         switch (LOWORD(wParam)) {
         case ID_MENU_ABOUT:
             ShowAboutDialog(hWnd);
+            break;
+        case ID_MENU_REFRESH_INTERVAL:
+            DialogBox(g_hInst, MAKEINTRESOURCE(IDD_REFRESH_INTERVAL), hWnd, RefreshIntervalDlgProc);
             break;
         case ID_MENU_LANG_EN:
             SetLanguage(&lang_en);
@@ -991,6 +1087,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_AUTOSTART, g_lang->menu_autostart);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
+    AppendMenu(g_hMenu, MF_STRING, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
     g_hLangMenu = CreatePopupMenu();
     AppendMenu(g_hLangMenu, MF_STRING, ID_MENU_LANG_EN, _T("English"));
     AppendMenu(g_hLangMenu, MF_STRING, ID_MENU_LANG_DE, _T("Deutsch"));
