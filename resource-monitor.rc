@@ -15,7 +15,7 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About Resource Monitor"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT           "Resource Monitor v2.3.0", -1, 10, 10, 160, 10
+    LTEXT           "Resource Monitor v2.3.1", -1, 10, 10, 160, 10
     LTEXT           "Monitor current CPU and Memory usage in tray", -1, 10, 25, 160, 10
     LTEXT           "Created By Ferenc Lutischan", -1, 10, 40, 160, 10
     LTEXT           "Visit our website", IDC_WEBSITE, 10, 55, 160, 10, SS_NOTIFY
