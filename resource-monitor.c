@@ -154,9 +154,9 @@ static LANG lang_it = {
     _T("Uso medio CPU: %.1f%%"),
     _T("Visualizza icona memoria"),
     _T("Visualizza icona CPU"),
-    _T("Intervallo di aggiornamento..."),
-    _T("Intervallo di aggiornamento"),
-    _T("Intervallo di aggiornamento:"),
+    _T("Intervallo aggiornamento..."),
+    _T("Intervallo aggiornamento"),
+    _T("Intervallo aggiornamento:"),
 };
 
 static LANG lang_es = {
