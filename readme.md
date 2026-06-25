@@ -26,11 +26,18 @@ To build and run the application on Windows:
 \mingw32\bin\gcc -ffunction-sections -fdata-sections -s -o resource-monitor resource-monitor.c resource-monitor_res.o -lpdh -mwindows -lwinmm -Wl,--gc-sections -static-libgcc -municode
 ```
 
+Or simply run:
+```sh
+compile.bat
+```
+
 ## Features
 - Displays live CPU core usage in the system tray.
 - Displays memory usage statistics in the system tray.
 - Updates system tray icons dynamically to reflect real-time usage.
-- Provides a language selection menu with support for multiple languages.
+- **CPU display modes**: Switch between showing all cores, a single average line, or the highest loaded core — useful for high-core-count systems where the menu would be too long.
+- **Context menu**: Right-click any icon to access detailed stats, toggle icon visibility, change language, adjust refresh interval, and more.
+- Provides a language selection menu with support for multiple languages (English, Hungarian, German, Italian, Spanish, French, Russian).
 - Provides an exit option to close the application.
 
 ## Adding a New Language
@@ -53,7 +60,16 @@ To add a new language to the Resource Monitor, follow these steps:
        _T("Uso de memória: %.1f%%"),            // tooltip_memory_usage
        _T("Média CPU: %.1f%%"),                 // tooltip_cpu_avg
        _T("Mostrar ícone de memória"),           // menu_show_memory_icon
-       _T("Mostrar ícone de CPU")               // menu_show_cpu_icon
+       _T("Mostrar ícone de CPU"),              // menu_show_cpu_icon
+       _T("Intervalo de atualização..."),        // menu_refresh_interval
+       _T("Intervalo de atualização"),           // dialog_refresh_title
+       _T("Intervalo de atualização:"),          // dialog_refresh_label
+       _T("Exibição da CPU"),                   // menu_cpu_display
+       _T("Mostrar todos os núcleos"),           // menu_cpu_show_all
+       _T("Mostrar média"),                     // menu_cpu_show_avg
+       _T("Mostrar máximo"),                    // menu_cpu_show_max
+       _T("Média CPU: %.1f%%"),                 // cpu_avg_format
+       _T("Máx CPU: %.1f%% (Núcleo %d)"),       // cpu_max_format
    };
    ```
 

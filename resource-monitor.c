@@ -26,7 +26,7 @@
 #define IDC_SLIDER_REFRESH_INTERVAL 1002
 #define IDC_STATIC_REFRESH_VALUE 1003
 #define IDC_STATIC_REFRESH_LABEL 1004
-#define ID_MENU_CPU_BASE 200
+#define ID_MENU_CPU_BASE 3000
 #define ID_MENU_AUTOSTART 300
 #define ID_MENU_LANGUAGE 301
 #define ID_MENU_LANG_EN 302
@@ -40,7 +40,15 @@
 #define ID_MENU_EXIT 400
 #define ID_MENU_SHOW_MEMORY_ICON 500
 #define ID_MENU_SHOW_CPU_ICON 501
-#define MAX_CORES 64
+#define ID_MENU_CPU_DISPLAY 600
+#define ID_MENU_CPU_SHOW_ALL 601
+#define ID_MENU_CPU_SHOW_AVG 602
+#define ID_MENU_CPU_SHOW_MAX 603
+
+#define CPU_DISPLAY_MODE_ALL 0
+#define CPU_DISPLAY_MODE_AVG 1
+#define CPU_DISPLAY_MODE_MAX 2
+#define MAX_CORES 256
 #define ICON_SIZE 32
 #define AUTO_START_REG_VALUE _T("ResourceMonitor")
 
@@ -80,6 +88,12 @@ typedef struct {
     TCHAR menu_refresh_interval[64];
     TCHAR dialog_refresh_title[64];
     TCHAR dialog_refresh_label[64];
+    TCHAR menu_cpu_display[64];
+    TCHAR menu_cpu_show_all[64];
+    TCHAR menu_cpu_show_avg[64];
+    TCHAR menu_cpu_show_max[64];
+    TCHAR cpu_avg_format[64];
+    TCHAR cpu_max_format[64];
 } LANG;
 
 // Localization data
@@ -100,6 +114,12 @@ static LANG lang_en = {
     _T("Refresh Interval..."),
     _T("Refresh Interval"),
     _T("Refresh interval:"),
+    _T("CPU Display"),
+    _T("Show All Cores"),
+    _T("Show Average"),
+    _T("Show Maximum"),
+    _T("CPU Avg: %.1f%%"),
+    _T("CPU Max: %.1f%% (Core %d)"),
 };
 
 static LANG lang_hu = {
@@ -119,6 +139,12 @@ static LANG lang_hu = {
     _T("Frissítési idő..."),
     _T("Frissítési idő"),
     _T("Frissítési intervallum:"),
+    _T("CPU Megjelenítés"),
+    _T("Összes mag mutatása"),
+    _T("Átlag mutatása"),
+    _T("Maximum mutatása"),
+    _T("CPU Átlag: %.1f%%"),
+    _T("CPU Max: %.1f%% (%d. mag)"),
 };
 
 static LANG lang_de = {
@@ -138,6 +164,12 @@ static LANG lang_de = {
     _T("Aktualisierungsintervall..."),
     _T("Aktualisierungsintervall"),
     _T("Aktualisierungsintervall:"),
+    _T("CPU-Anzeige"),
+    _T("Alle Kerne anzeigen"),
+    _T("Durchschnitt anzeigen"),
+    _T("Maximum anzeigen"),
+    _T("CPU Durchschnitt: %.1f%%"),
+    _T("CPU Max: %.1f%% (Kern %d)"),
 };
 
 static LANG lang_it = {
@@ -157,6 +189,12 @@ static LANG lang_it = {
     _T("Intervallo aggiornamento..."),
     _T("Intervallo aggiornamento"),
     _T("Intervallo aggiornamento:"),
+    _T("Visualizzazione CPU"),
+    _T("Mostra tutti i core"),
+    _T("Mostra media"),
+    _T("Mostra massimo"),
+    _T("Media CPU: %.1f%%"),
+    _T("Max CPU: %.1f%% (Core %d)"),
 };
 
 static LANG lang_es = {
@@ -176,6 +214,12 @@ static LANG lang_es = {
     _T("Intervalo de actualización..."),
     _T("Intervalo de actualización"),
     _T("Intervalo de actualización:"),
+    _T("Visualización de CPU"),
+    _T("Mostrar todos los núcleos"),
+    _T("Mostrar promedio"),
+    _T("Mostrar máximo"),
+    _T("Promedio CPU: %.1f%%"),
+    _T("Máx CPU: %.1f%% (Núcleo %d)"),
 };
 
 static LANG lang_fr = {
@@ -195,6 +239,12 @@ static LANG lang_fr = {
     _T("Intervalle de rafraîchissement..."),
     _T("Intervalle de rafraîchissement"),
     _T("Intervalle de rafraîchissement:"),
+    _T("Affichage CPU"),
+    _T("Afficher tous les cœurs"),
+    _T("Afficher la moyenne"),
+    _T("Afficher le maximum"),
+    _T("Moyenne CPU: %.1f%%"),
+    _T("Max CPU: %.1f%% (Cœur %d)"),
 };
 
 static LANG lang_ru = {
@@ -214,6 +264,12 @@ static LANG lang_ru = {
     _T("Интервал обновления..."),
     _T("Интервал обновления"),
     _T("Интервал обновления:"),
+    _T("Отображение CPU"),
+    _T("Показать все ядра"),
+    _T("Показать среднее"),
+    _T("Показать максимум"),
+    _T("Средняя CPU: %.1f%%"),
+    _T("Макс CPU: %.1f%% (Ядро %d)"),
 };
 
 // Function prototypes
@@ -241,6 +297,9 @@ void LoadRefreshIntervalFromRegistry(void);
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void ShowAboutDialog(HWND hwndParent);
+void RebuildCpuMenuItems(CPUINFO *ci);
+void SaveCpuDisplaySettingsToRegistry(void);
+void LoadCpuDisplaySettingsFromRegistry(void);
 
 // Global variables
 static LANG *g_lang = &lang_en;
@@ -248,6 +307,7 @@ static HINSTANCE g_hInst;
 static HWND g_hWnd;
 static HMENU g_hMenu;
 static HMENU g_hLangMenu;
+static HMENU g_hCpuDisplayMenu;
 static NOTIFYICONDATA g_nidMemory = {0};
 static NOTIFYICONDATA g_nidCpu = {0};
 static HBITMAP g_hBmpUsed;
@@ -270,7 +330,50 @@ static PDH_HCOUNTER *g_pdhCountersCpu;
 static int g_coreCount;
 static BOOL g_showMemoryIcon = TRUE;
 static BOOL g_showCpuIcon = TRUE;
+static int g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
 static int screenWidth = 0, screenHeight = 0;
+
+// Rebuilds the CPU section of the context menu based on display mode
+void RebuildCpuMenuItems(CPUINFO *ci) {
+    // Remove all existing CPU items
+    for (int i = 0; i < MAX_CORES; i++) {
+        RemoveMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND);
+    }
+
+    // Reference the CPU Display submenu handle for correct insertion position
+    UINT_PTR insertRef = (UINT_PTR)g_hCpuDisplayMenu;
+
+    TCHAR buf[64];
+    if (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL) {
+        for (int i = g_coreCount - 1; i >= 0; i--) {
+            double val = ci ? ci->percents[i] : 0.0;
+            StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, val);
+            InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
+        }
+    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG) {
+        double avg = 0.0;
+        if (ci) {
+            for (int i = 0; i < g_coreCount; i++) avg += ci->percents[i];
+            avg /= g_coreCount;
+        }
+        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, avg);
+        InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
+    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX) {
+        double maxVal = 0.0;
+        int maxCore = 0;
+        if (ci) {
+            maxVal = ci->percents[0];
+            for (int i = 1; i < g_coreCount; i++) {
+                if (ci->percents[i] > maxVal) {
+                    maxVal = ci->percents[i];
+                    maxCore = i;
+                }
+            }
+        }
+        StringCchPrintf(buf, 64, g_lang->cpu_max_format, maxVal, maxCore + 1);
+        InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
+    }
+}
 
 // Updates memory usage information using system and PDH counters
 void UpdateMemoryInfo(MEMINFO *mi) {
@@ -488,7 +591,6 @@ HBITMAP CreateColorBitmap(COLORREF color, int width, int height) {
 }
 
 // Updates the system tray memory icon and menu
-// Updates the system tray memory icon and menu
 void UpdateTrayMemory(MEMINFO *mi) {
     TCHAR buf[64];
     DWORD usedMB = (DWORD)(mi->usedPhys / (1024 * 1024));
@@ -535,7 +637,6 @@ void UpdateCpuInfo(CPUINFO *ci) {
     if (!g_pdhQueryCpu || !g_pdhCountersCpu) return;
 
     PdhCollectQueryData(g_pdhQueryCpu);
-    Sleep(100);
 
     for (int i = 0; i < g_coreCount; i++) {
         PDH_FMT_COUNTERVALUE cv;
@@ -560,7 +661,8 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     int groupSize = numCores > maxWidth ? (numCores + maxWidth - 1) / maxWidth : 1;
     int numGroups = (numCores + groupSize - 1) / groupSize;
 
-    double *groupPercents = (double *)calloc(numGroups, sizeof(double));
+    double groupPercents[MAX_CORES] = {0};
+    
     for (int i = 0; i < numCores; i++) {
         groupPercents[i / groupSize] += ci->percents[i];
     }
@@ -580,6 +682,7 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
 
+    // Initialize background with transparent pixels
     BYTE *pPixel = (BYTE *)pBits;
     for (int y = 0; y < imgHeight; y++) {
         for (int x = 0; x < imgWidth; x++) {
@@ -602,9 +705,12 @@ HICON GenerateBarIcon(CPUINFO *ci) {
         for (int y = imgHeight - barHeight; y < imgHeight; y++) {
             for (int x = xStart; x < xEnd; x++) {
                 BYTE *pixel = pPixel + (x - xStart) * 4;
-                pixel[0] = (barHeight > 16) ? 0 : 100;
-                pixel[1] = (barHeight > 16) ? 0 : 100;
-                pixel[2] = (barHeight > 16) ? 139 : 100;
+                COLORREF barColor = (groupPercents[i] > 50)
+                    ? RGB(200, 100, 100)
+                    : RGB(100, 200, 100);
+                pixel[0] = GetBValue(barColor);
+                pixel[1] = GetGValue(barColor);
+                pixel[2] = GetRValue(barColor);
                 pixel[3] = 255;
             }
             pPixel += imgWidth * 4;
@@ -626,7 +732,6 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     DeleteObject(hBmp);
     DeleteObject(hMonoBmp);
     ReleaseDC(NULL, hdcScreen);
-    free(groupPercents);
 
     return hIcon;
 }
@@ -635,12 +740,31 @@ HICON GenerateBarIcon(CPUINFO *ci) {
 void UpdateTrayCpu(CPUINFO *ci) {
     TCHAR buf[64];
     double avg = 0.0;
+    double maxVal = 0.0;
+    int maxCore = 0;
+
     for (int i = 0; i < ci->core_count; i++) {
-        StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, ci->percents[i]);
-        ModifyMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
         avg += ci->percents[i];
+        if (i == 0 || ci->percents[i] > maxVal) {
+            maxVal = ci->percents[i];
+            maxCore = i;
+        }
     }
     avg /= ci->core_count ? ci->core_count : 1;
+
+    // Update menu items based on display mode
+    if (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL) {
+        for (int i = 0; i < ci->core_count; i++) {
+            StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, ci->percents[i]);
+            ModifyMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
+        }
+    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG) {
+        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, avg);
+        ModifyMenu(g_hMenu, ID_MENU_CPU_BASE, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
+    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX) {
+        StringCchPrintf(buf, 64, g_lang->cpu_max_format, maxVal, maxCore + 1);
+        ModifyMenu(g_hMenu, ID_MENU_CPU_BASE, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
+    }
 
     StringCchPrintf(g_nidCpu.szTip, sizeof(g_nidCpu.szTip)/sizeof(TCHAR), g_lang->tooltip_cpu_avg, avg);
     Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
@@ -727,6 +851,23 @@ void RefreshMenuText(void) {
     mii.dwTypeData = g_lang->menu_language;
     mii.hSubMenu = g_hLangMenu;
     SetMenuItemInfo(g_hMenu, (UINT_PTR)g_hLangMenu, FALSE, &mii);
+
+    MENUITEMINFO miiCpu = {0};
+    miiCpu.cbSize = sizeof(MENUITEMINFO);
+    miiCpu.fMask = MIIM_STRING | MIIM_SUBMENU;
+    miiCpu.dwTypeData = g_lang->menu_cpu_display;
+    miiCpu.hSubMenu = g_hCpuDisplayMenu;
+    SetMenuItemInfo(g_hMenu, (UINT_PTR)g_hCpuDisplayMenu, FALSE, &miiCpu);
+
+    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_ALL, g_lang->menu_cpu_show_all);
+    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_AVG, g_lang->menu_cpu_show_avg);
+    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_MAX, g_lang->menu_cpu_show_max);
+
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX ? MF_CHECKED : MF_UNCHECKED));
+
+    RebuildCpuMenuItems(NULL);
 }
 
 // Checks if autostart is enabled
@@ -754,8 +895,10 @@ void SetAutoStart(BOOL enable) {
 
     if (enable) {
         TCHAR szPath[MAX_PATH];
+        TCHAR szQuotedPath[MAX_PATH + 2];
         if (GetModuleFileName(NULL, szPath, MAX_PATH)) {
-            RegSetValueEx(hKey, AUTO_START_REG_VALUE, 0, REG_SZ, (const BYTE *)szPath, (lstrlen(szPath) + 1) * sizeof(TCHAR));
+            StringCchPrintf(szQuotedPath, MAX_PATH + 2, _T("\"%s\""), szPath);
+            RegSetValueEx(hKey, AUTO_START_REG_VALUE, 0, REG_SZ, (const BYTE *)szQuotedPath, (lstrlen(szQuotedPath) + 1) * sizeof(TCHAR));
         }
     } else {
         RegDeleteValue(hKey, AUTO_START_REG_VALUE);
@@ -791,6 +934,28 @@ void LoadMenuStateFromRegistry(void) {
         RegQueryValueEx(hKey, _T("ShowCpuIcon"), NULL, NULL, (LPBYTE)&showCpuIcon, &dataSize);
         g_showMemoryIcon = showMemoryIcon != 0;
         g_showCpuIcon = showCpuIcon != 0;
+        RegCloseKey(hKey);
+    }
+}
+
+// Saves the CPU display mode to the registry
+void SaveCpuDisplaySettingsToRegistry(void) {
+    HKEY hKey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD cpuMode = (DWORD)g_cpuDisplayMode;
+        RegSetValueEx(hKey, _T("CpuDisplayMode"), 0, REG_DWORD, (const BYTE *)&cpuMode, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+// Loads the CPU display mode from the registry
+void LoadCpuDisplaySettingsFromRegistry(void) {
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dataSize = sizeof(DWORD);
+        DWORD cpuMode = CPU_DISPLAY_MODE_ALL;
+        RegQueryValueEx(hKey, _T("CpuDisplayMode"), NULL, NULL, (LPBYTE)&cpuMode, &dataSize);
+        g_cpuDisplayMode = (int)cpuMode;
         RegCloseKey(hKey);
     }
 }
@@ -1021,6 +1186,30 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateIconVisibility();
             SaveMenuStateToRegistry();
             break;
+        case ID_MENU_CPU_SHOW_ALL:
+            g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | MF_CHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | MF_UNCHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | MF_UNCHECKED);
+            RebuildCpuMenuItems(NULL);
+            SaveCpuDisplaySettingsToRegistry();
+            break;
+        case ID_MENU_CPU_SHOW_AVG:
+            g_cpuDisplayMode = CPU_DISPLAY_MODE_AVG;
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | MF_UNCHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | MF_CHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | MF_UNCHECKED);
+            RebuildCpuMenuItems(NULL);
+            SaveCpuDisplaySettingsToRegistry();
+            break;
+        case ID_MENU_CPU_SHOW_MAX:
+            g_cpuDisplayMode = CPU_DISPLAY_MODE_MAX;
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | MF_UNCHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | MF_UNCHECKED);
+            CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | MF_CHECKED);
+            RebuildCpuMenuItems(NULL);
+            SaveCpuDisplaySettingsToRegistry();
+            break;
         }
         break;
 
@@ -1032,6 +1221,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
         if (g_hMenu) DestroyMenu(g_hMenu);
         if (g_hLangMenu) DestroyMenu(g_hLangMenu);
+        if (g_hCpuDisplayMenu) DestroyMenu(g_hCpuDisplayMenu);
         if (g_pdhQueryMemory) PdhCloseQuery(g_pdhQueryMemory);
         if (g_pdhQueryCpu) PdhCloseQuery(g_pdhQueryCpu);
         if (g_pdhCountersCpu) free(g_pdhCountersCpu);
@@ -1084,6 +1274,14 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
         AppendMenu(g_hMenu, MF_STRING, ID_MENU_CPU_BASE + i, buf);
     }
     AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
+
+    // CPU Display mode submenu
+    g_hCpuDisplayMenu = CreatePopupMenu();
+    AppendMenu(g_hCpuDisplayMenu, MF_STRING | MF_CHECKED, ID_MENU_CPU_SHOW_ALL, g_lang->menu_cpu_show_all);
+    AppendMenu(g_hCpuDisplayMenu, MF_STRING, ID_MENU_CPU_SHOW_AVG, g_lang->menu_cpu_show_avg);
+    AppendMenu(g_hCpuDisplayMenu, MF_STRING, ID_MENU_CPU_SHOW_MAX, g_lang->menu_cpu_show_max);
+    AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)g_hCpuDisplayMenu, g_lang->menu_cpu_display);
+
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_AUTOSTART, g_lang->menu_autostart);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
@@ -1169,7 +1367,14 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
         SetAutoStart(TRUE);
     }
     LoadMenuStateFromRegistry();
+    LoadCpuDisplaySettingsFromRegistry();
+    if (g_cpuDisplayMode != CPU_DISPLAY_MODE_ALL) {
+        RebuildCpuMenuItems(NULL);
+    }
     RefreshMenuText();
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX ? MF_CHECKED : MF_UNCHECKED));
     UpdateIconVisibility();
 
     // Main message loop
