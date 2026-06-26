@@ -190,9 +190,9 @@ static LANG lang_it = {
     _T("Intervallo aggiornamento"),
     _T("Intervallo aggiornamento:"),
     _T("Visualizzazione CPU"),
-    _T("Mostra tutti i core"),
-    _T("Mostra media"),
-    _T("Mostra massimo"),
+    _T("Visualizza tutti i core"),
+    _T("Visualizza media"),
+    _T("Visualizza massimo"),
     _T("Media CPU: %.1f%%"),
     _T("Max CPU: %.1f%% (Core %d)"),
 };
