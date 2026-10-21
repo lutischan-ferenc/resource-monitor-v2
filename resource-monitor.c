@@ -8,9 +8,12 @@
 #include <strsafe.h>
 #include <winreg.h>
 #include <math.h>
+#include <string.h>
+#include <stdlib.h>
 #include <commctrl.h>
 
 #pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "comctl32.lib")
 
 // System tray and menu constants
 #define WM_TRAYICON (WM_USER + 1)
@@ -50,6 +53,7 @@
 #define CPU_DISPLAY_MODE_MAX 2
 #define MAX_CORES 256
 #define ICON_SIZE 32
+#define CACHE_COUNTERS 5
 #define AUTO_START_REG_VALUE _T("ResourceMonitor")
 
 // Structure to hold memory usage information
@@ -68,6 +72,8 @@ typedef struct {
 typedef struct {
     int core_count;
     double percents[MAX_CORES];
+    double avg, max;                // stats of percents[], computed once in UpdateCpuInfo
+    int max_core;
 } CPUINFO;
 
 // Structure for localized menu and tooltip strings
@@ -276,10 +282,12 @@ static LANG lang_ru = {
 void UpdateMemoryInfo(MEMINFO *mi);
 HICON GeneratePieIcon(MEMINFO *mi);
 void UpdateTrayMemory(MEMINFO *mi);
+void UpdateMenuMemory(MEMINFO *mi);
 void UpdateCpuInfo(CPUINFO *ci);
-BOOL CpuUsageChanged(CPUINFO *ci);
 HICON GenerateBarIcon(CPUINFO *ci);
 void UpdateTrayCpu(CPUINFO *ci);
+void UpdateMenuCpu(CPUINFO *ci);
+void SetMenuText(HMENU m, UINT id, LPCTSTR text);
 void SetLanguage(LANG *newLang);
 void InitializeMenuWithIcons(void);
 void CleanupMenuIcons(void);
@@ -317,26 +325,33 @@ static HICON g_hIconCpu;
 static BOOL g_autoStartChecked;
 static DWORD g_refreshInterval = 1000;
 static DWORDLONG g_lastUsedMB;
-static double g_lastPercents[MAX_CORES];
-static PDH_HQUERY g_pdhQueryMemory;
-static PDH_HCOUNTER g_pdhCounterMemory;
-static PDH_HCOUNTER g_pdhCounterModifiedPageListBytes;
-static PDH_HCOUNTER g_pdhCounterStandbyCoreBytes;
-static PDH_HCOUNTER g_pdhCounterStandbyNormalBytes;
-static PDH_HCOUNTER g_pdhCounterStandbyReserveBytes;
+static int g_lastBars[ICON_SIZE];   // packed height+color of the bars in the last CPU icon
+static BOOL g_menuOpen;             // menu texts are only refreshed while the menu is visible
+static PDH_HQUERY g_pdhQuery;       // one query holds every counter: one collect per tick
+static BOOL g_pdhOk;
+static PDH_HCOUNTER g_pdhCounterCache[CACHE_COUNTERS];
 static PDH_HCOUNTER g_pdhCounterCommittedBytes;
-static PDH_HQUERY g_pdhQueryCpu;
-static PDH_HCOUNTER *g_pdhCountersCpu;
+static PDH_HCOUNTER g_pdhCountersCpu[MAX_CORES];
 static int g_coreCount;
 static BOOL g_showMemoryIcon = TRUE;
 static BOOL g_showCpuIcon = TRUE;
 static int g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
 static int screenWidth = 0, screenHeight = 0;
 
+static const LPCTSTR kCachePaths[CACHE_COUNTERS] = {
+    _T("\\Memory\\Cache Bytes"),
+    _T("\\Memory\\Modified Page List Bytes"),
+    _T("\\Memory\\Standby Cache Core Bytes"),
+    _T("\\Memory\\Standby Cache Normal Priority Bytes"),
+    _T("\\Memory\\Standby Cache Reserve Bytes"),
+};
+
+static const BYTE kZeroMask[(ICON_SIZE / 8) * ICON_SIZE]; // all-zero icon mask
+
 // Rebuilds the CPU section of the context menu based on display mode
 void RebuildCpuMenuItems(CPUINFO *ci) {
-    // Remove all existing CPU items
-    for (int i = 0; i < MAX_CORES; i++) {
+    // Remove the existing CPU items (one loop over the real core count)
+    for (int i = 0; i < g_coreCount; i++) {
         RemoveMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND);
     }
 
@@ -346,210 +361,150 @@ void RebuildCpuMenuItems(CPUINFO *ci) {
     TCHAR buf[64];
     if (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL) {
         for (int i = g_coreCount - 1; i >= 0; i--) {
-            double val = ci ? ci->percents[i] : 0.0;
-            StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, val);
+            StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, ci ? ci->percents[i] : 0.0);
             InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
         }
     } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG) {
-        double avg = 0.0;
-        if (ci) {
-            for (int i = 0; i < g_coreCount; i++) avg += ci->percents[i];
-            avg /= g_coreCount;
-        }
-        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, avg);
+        // stats are precomputed by UpdateCpuInfo (one pass per tick)
+        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, ci ? ci->avg : 0.0);
         InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
-    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX) {
-        double maxVal = 0.0;
-        int maxCore = 0;
-        if (ci) {
-            maxVal = ci->percents[0];
-            for (int i = 1; i < g_coreCount; i++) {
-                if (ci->percents[i] > maxVal) {
-                    maxVal = ci->percents[i];
-                    maxCore = i;
-                }
-            }
-        }
-        StringCchPrintf(buf, 64, g_lang->cpu_max_format, maxVal, maxCore + 1);
+    } else {
+        StringCchPrintf(buf, 64, g_lang->cpu_max_format,
+                        ci ? ci->max : 0.0, ci ? ci->max_core + 1 : 1);
         InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
     }
 }
 
-// Updates memory usage information using system and PDH counters
+// Updates memory usage information using system and PDH counters.
+// The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateMemoryInfo(MEMINFO *mi) {
     MEMORYSTATUSEX ms = { sizeof(ms) };
-    GlobalMemoryStatusEx(&ms);
+    if (!GlobalMemoryStatusEx(&ms) || ms.ullTotalPhys == 0) return;
+
     mi->totalPhys = ms.ullTotalPhys;
     mi->availPhys = ms.ullAvailPhys;
     mi->usedPhys = mi->totalPhys - mi->availPhys;
     mi->usedPercent = (double)mi->usedPhys / mi->totalPhys * 100.0;
     mi->totalSwap = ms.ullTotalPageFile;
 
-    if (!g_pdhQueryMemory) return;
-
-    if (PdhCollectQueryData(g_pdhQueryMemory) == ERROR_SUCCESS) {
+    if (g_pdhOk) {
         PDH_FMT_COUNTERVALUE cv;
         DWORDLONG totalCached = 0;
-
-        if (PdhGetFormattedCounterValue(g_pdhCounterMemory, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS) {
-            totalCached += cv.largeValue;
-        }
-        if (PdhGetFormattedCounterValue(g_pdhCounterModifiedPageListBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS) {
-            totalCached += cv.largeValue;
-        }
-        if (PdhGetFormattedCounterValue(g_pdhCounterStandbyCoreBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS) {
-            totalCached += cv.largeValue;
-        }
-        if (PdhGetFormattedCounterValue(g_pdhCounterStandbyNormalBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS) {
-            totalCached += cv.largeValue;
-        }
-        if (PdhGetFormattedCounterValue(g_pdhCounterStandbyReserveBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS) {
-            totalCached += cv.largeValue;
+        for (int i = 0; i < CACHE_COUNTERS; i++) {
+            if (PdhGetFormattedCounterValue(g_pdhCounterCache[i], PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS)
+                totalCached += (DWORDLONG)cv.largeValue;
         }
         mi->cachedBytes = totalCached;
 
         mi->committedBytes = (PdhGetFormattedCounterValue(g_pdhCounterCommittedBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS)
-            ? cv.largeValue : 0;
+            ? (DWORDLONG)cv.largeValue : 0;
     }
 
     mi->swapUsed = (mi->committedBytes > mi->usedPhys) ? (mi->committedBytes - mi->usedPhys) : 0;
 }
 
-// Generates a pie chart icon representing memory usage
-HICON GeneratePieIcon(MEMINFO *mi)
-{
-    const int supersample = 2;
-    const int ss_size = ICON_SIZE * supersample;
-    const int center = ss_size / 2;
-    const int radius = ss_size / 2 - 1;
-
+// Creates a 32bpp ARGB icon from raw pixel data (no GDI device contexts)
+static HICON CreateArgbIcon(const DWORD *pix) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = ss_size;
-    bmi.bmiHeader.biHeight = -ss_size;
+    bmi.bmiHeader.biWidth = ICON_SIZE;
+    bmi.bmiHeader.biHeight = -ICON_SIZE;      // top-down
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    HDC hdcScreen = GetDC(NULL);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    void *pBits;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-    HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
-
-    RECT rect = {0, 0, ss_size, ss_size};
-    HBRUSH hbrBackground = CreateSolidBrush(RGB(200, 200, 200));
-    FillRect(hdcMem, &rect, hbrBackground);
-
-    HBRUSH hbrUsed = CreateSolidBrush(RGB(200, 200, 200));
-    HBRUSH hbrFree = CreateSolidBrush(RGB(100, 100, 100));
-
-    double usedPercent = mi->usedPercent;
-    double freePercent = 100.0 - usedPercent;
-
-    double startAngle = -90.0;
-    struct {
-        double percent;
-        HBRUSH brush;
-    } slices[] = {
-        {usedPercent, hbrUsed},
-        {freePercent, hbrFree}
-    };
-    int sliceCount = sizeof(slices) / sizeof(slices[0]);
-
-    for (int i = 0; i < sliceCount; i++) {
-        if (slices[i].percent > 0.0) {
-            double endAngle = startAngle + slices[i].percent * 3.6;
-            double radStart = startAngle * (3.14159265 / 180.0);
-            double radEnd = endAngle * (3.14159265 / 180.0);
-
-            POINT points[100];
-            int pointCount = 0;
-            double angleStep = (radEnd - radStart) / 99.0;
-            for (int j = 0; j < 100; j++) {
-                double angle = radStart + j * angleStep;
-                points[pointCount].x = center + (int)(radius * cos(angle));
-                points[pointCount].y = center + (int)(radius * sin(angle));
-                pointCount++;
-            }
-
-            points[pointCount].x = center;
-            points[pointCount].y = center;
-            pointCount++;
-
-            SelectObject(hdcMem, slices[i].brush);
-            SelectObject(hdcMem, GetStockObject(NULL_PEN));
-            Polygon(hdcMem, points, pointCount);
-
-            startAngle = endAngle;
-        }
+    void *bits = NULL;
+    HBITMAP hColor = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hColor || !bits) {
+        if (hColor) DeleteObject(hColor);
+        return NULL;
     }
+    memcpy(bits, pix, sizeof(DWORD) * ICON_SIZE * ICON_SIZE);
 
-    DeleteObject(hbrUsed);
-    DeleteObject(hbrFree);
+    HBITMAP hMask = CreateBitmap(ICON_SIZE, ICON_SIZE, 1, 1, kZeroMask);
+    HICON hIcon = NULL;
+    if (hMask) {
+        ICONINFO ii = { TRUE, 0, 0, hMask, hColor };
+        hIcon = CreateIconIndirect(&ii);
+        DeleteObject(hMask);
+    }
+    DeleteObject(hColor);
+    return hIcon;
+}
 
-    HDC hdcFinal = CreateCompatibleDC(hdcScreen);
-    BITMAPINFO bmi_final = {0};
-    bmi_final.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi_final.bmiHeader.biWidth = ICON_SIZE;
-    bmi_final.bmiHeader.biHeight = -ICON_SIZE;
-    bmi_final.bmiHeader.biPlanes = 1;
-    bmi_final.bmiHeader.biBitCount = 32;
-    void *pBitsFinal;
-    HBITMAP hBmpFinal = CreateDIBSection(hdcFinal, &bmi_final, DIB_RGB_COLORS, &pBitsFinal, NULL, 0);
-    HGDIOBJ hOldFinalBmp = SelectObject(hdcFinal, hBmpFinal);
+// The pie icon's subpixel geometry never changes, so the expensive atan2
+// angles are precomputed once into a lookup table (built lazily on first
+// use): 0 = subpixel outside the circle, otherwise angle in 1/65536 turns + 1.
+// A companion table holds each subpixel's edge-fade (feather) weight, so the
+// render loop needs no sqrt either.  Both tables are heap-allocated: as
+// statics they would add ~320 KB to the PE image on this toolchain.
+enum { PIE_SS = 8, PIE_SCALE = 65536, PIE_SUBPX = PIE_SS * PIE_SS };
+static DWORD *g_pieAngles;
+static BYTE  *g_pieFeather;
+static BOOL g_pieAnglesReady;
 
-    SetStretchBltMode(hdcFinal, HALFTONE);
-    StretchBlt(hdcFinal, 0, 0, ICON_SIZE, ICON_SIZE,
-               hdcMem, 0, 0, ss_size, ss_size, SRCCOPY);
-
-    BYTE *pPixel = (BYTE *)pBitsFinal;
+static BOOL InitPieAngles(void) {
+    const size_t n = (size_t)ICON_SIZE * ICON_SIZE * PIE_SUBPX;
+    const double c = ICON_SIZE / 2.0, R = c - 0.5, R2 = R * R;
+    const double twoPi = 6.28318530717958647692;
+    DWORD *p = g_pieAngles = calloc(n, sizeof(DWORD));   // zeroed: 0 = outside circle
+    BYTE *q = g_pieFeather = calloc(n, sizeof(BYTE));
+    if (!p || !q) {
+        free(g_pieAngles);   g_pieAngles = NULL;
+        free(g_pieFeather);  g_pieFeather = NULL;
+        return FALSE;
+    }
     for (int y = 0; y < ICON_SIZE; y++) {
         for (int x = 0; x < ICON_SIZE; x++) {
-            int dx = x - ICON_SIZE / 2;
-            int dy = y - ICON_SIZE / 2;
-            float dist = sqrtf(dx * dx + dy * dy);
-            if (dist > ICON_SIZE / 2) {
-                pPixel[3] = 0x00;
-            } else if (dist > ICON_SIZE / 2 - 1.5f) {
-                float alpha = 1.0f - (dist - (ICON_SIZE / 2 - 1.5f));
-                pPixel[3] = (BYTE)(alpha * 255);
-            } else {
-                pPixel[3] = 0xFF;
+            for (int sy = 0; sy < PIE_SS; sy++) {
+                for (int sx = 0; sx < PIE_SS; sx++, p++, q++) {
+                    double dx = x + (sx + 0.5) / PIE_SS - c;
+                    double dy = y + (sy + 0.5) / PIE_SS - c;
+                    double d2 = dx * dx + dy * dy;
+                    if (d2 > R2) continue;
+                    double a = atan2(dx, -dy);       // 0 at 12 o'clock, clockwise
+                    if (a < 0.0) a += twoPi;
+                    *p = (DWORD)(a * (PIE_SCALE / twoPi)) + 1;
+
+                    // edge fade over the outermost 1.5 px, sampled per subpixel
+                    double af = (R + 0.5 - sqrt(d2)) / 1.5;
+                    if (af > 1.0) af = 1.0;
+                    *q = (BYTE)(af * 255.0 + 0.5);
+                }
             }
-            pPixel += 4;
         }
     }
+    g_pieAnglesReady = TRUE;
+    return TRUE;
+}
 
-    HBITMAP hMonoBmp = CreateBitmap(ICON_SIZE, ICON_SIZE, 1, 1, NULL);
-    HDC hdcMask = CreateCompatibleDC(NULL);
-    HGDIOBJ hOldMaskBmp = SelectObject(hdcMask, hMonoBmp);
-    PatBlt(hdcMask, 0, 0, ICON_SIZE, ICON_SIZE, BLACKNESS);
+// Generates a pie chart icon representing memory usage: pure pixel math with
+// 8x8 supersampling and a subpixel-accurate feathered edge, instead of the
+// old GDI pipeline (3 DCs, 2 Polygon calls, HALFTONE StretchBlt, mask Ellipse).
+HICON GeneratePieIcon(MEMINFO *mi)
+{
+    DWORD pix[ICON_SIZE * ICON_SIZE];
+    if (!g_pieAnglesReady && !InitPieAngles()) return NULL;
+    const DWORD thr = (DWORD)(mi->usedPercent * (PIE_SCALE / 100.0));   // used iff angle < thr
+    const DWORD *a = g_pieAngles;
+    const BYTE *f = g_pieFeather;
 
-    HBRUSH hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
-    SelectObject(hdcMask, hWhiteBrush);
-    Ellipse(hdcMask, 0, 0, ICON_SIZE, ICON_SIZE);
+    for (int i = 0; i < ICON_SIZE * ICON_SIZE; i++, a += PIE_SUBPX, f += PIE_SUBPX) {
+        int nUsed = 0, nFree = 0, fade = 0;
+        for (int s = 0; s < PIE_SUBPX; s++) {
+            DWORD v = a[s];
+            if (v == 0) continue;               // subpixel outside the circle
+            fade += f[s];                       // feather weight of this subpixel
+            if (v - 1 < thr) nUsed++; else nFree++;
+        }
+        int n = nUsed + nFree;
+        if (n == 0) { pix[i] = 0; continue; }    // transparent background
 
-    ICONINFO ii = {0};
-    ii.fIcon = TRUE;
-    ii.hbmMask = hMonoBmp;
-    ii.hbmColor = hBmpFinal;
-    HICON hIcon = CreateIconIndirect(&ii);
-
-    SelectObject(hdcMem, hOldBmp);
-    SelectObject(hdcFinal, hOldFinalBmp);
-    SelectObject(hdcMask, hOldMaskBmp);
-    DeleteObject(hbrBackground);
-    DeleteObject(hWhiteBrush);
-    DeleteDC(hdcMem);
-    DeleteDC(hdcFinal);
-    DeleteDC(hdcMask);
-    ReleaseDC(NULL, hdcScreen);
-    DeleteObject(hBmp);
-    DeleteObject(hBmpFinal);
-    DeleteObject(hMonoBmp);
-
-    return hIcon;
+        DWORD gray = (DWORD)((nUsed * 200 + nFree * 100) / n);
+        DWORD alpha = (DWORD)((fade + PIE_SUBPX / 2) / PIE_SUBPX);   // average 0..255 weight
+        pix[i] = (alpha << 24) | (gray << 16) | (gray << 8) | gray;
+    }
+    return CreateArgbIcon(pix);
 }
 
 // Initializes menu icons for memory usage indicators
@@ -572,212 +527,171 @@ void CleanupMenuIcons(void) {
     g_hBmpFree = NULL;
 }
 
-// Creates a solid color bitmap for menu icons
+// Creates a solid color bitmap for menu icons (DIB fill, no DC needed)
 HBITMAP CreateColorBitmap(COLORREF color, int width, int height) {
-    HDC hdcScreen = GetDC(NULL);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
-    HGDIOBJ hOldBitmap = SelectObject(hdcMem, hBitmap);
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
-    HBRUSH hBrush = CreateSolidBrush(color);
-    RECT rect = {0, 0, width, height};
-    FillRect(hdcMem, &rect, hBrush);
-
-    SelectObject(hdcMem, hOldBitmap);
-    DeleteObject(hBrush);
-    DeleteDC(hdcMem);
-    ReleaseDC(NULL, hdcScreen);
+    void *bits = NULL;
+    HBITMAP hBitmap = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hBitmap && bits) {
+        DWORD argb = 0xFF000000u | (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color);
+        DWORD *p = (DWORD *)bits;
+        for (int i = 0; i < width * height; i++) p[i] = argb;
+    }
     return hBitmap;
 }
 
-// Updates the system tray memory icon and menu
-void UpdateTrayMemory(MEMINFO *mi) {
-    TCHAR buf[64];
-    DWORD usedMB = (DWORD)(mi->usedPhys / (1024 * 1024));
-    DWORD freeMB = (DWORD)(mi->availPhys / (1024 * 1024));
-    DWORD cachedMB = (DWORD)(mi->cachedBytes / (1024 * 1024));
-    DWORD swapMB = (DWORD)(mi->swapUsed / (1024 * 1024));
-
-    StringCchPrintf(buf, 64, g_lang->menu_used, usedMB);
-    ModifyMenu(g_hMenu, ID_MENU_USED, MF_BYCOMMAND | MF_STRING, ID_MENU_USED, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_free, freeMB);
-    ModifyMenu(g_hMenu, ID_MENU_FREE, MF_BYCOMMAND | MF_STRING, ID_MENU_FREE, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_cached, cachedMB);
-    ModifyMenu(g_hMenu, ID_MENU_CACHED, MF_BYCOMMAND | MF_STRING, ID_MENU_CACHED, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_swap, swapMB);
-    ModifyMenu(g_hMenu, ID_MENU_SWAP, MF_BYCOMMAND | MF_STRING, ID_MENU_SWAP, buf);
-
-    // Reapply bitmap icons for Used and Free menu items
+// MIIM_STRING keeps the item's bitmap, unlike ModifyMenu
+void SetMenuText(HMENU m, UINT id, LPCTSTR text) {
     MENUITEMINFO mii = {0};
-    mii.cbSize = sizeof(MENUITEMINFO);
-    mii.fMask = MIIM_BITMAP;
-    mii.hbmpItem = g_hBmpUsed;
-    SetMenuItemInfo(g_hMenu, ID_MENU_USED, FALSE, &mii);
-    mii.hbmpItem = g_hBmpFree;
-    SetMenuItemInfo(g_hMenu, ID_MENU_FREE, FALSE, &mii);
+    mii.cbSize = sizeof(mii);
+    mii.fMask = MIIM_STRING;
+    mii.dwTypeData = (LPTSTR)text;
+    SetMenuItemInfo(m, id, FALSE, &mii);
+}
 
-    StringCchPrintf(g_nidMemory.szTip, sizeof(g_nidMemory.szTip)/sizeof(TCHAR), g_lang->tooltip_memory_usage, mi->usedPercent);
-    Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
+// Updates the system tray memory icon; Shell_NotifyIcon is only called when
+// the tooltip or the icon actually changed
+void UpdateTrayMemory(MEMINFO *mi) {
+    TCHAR tip[128];
+    StringCchPrintf(tip, 128, g_lang->tooltip_memory_usage, mi->usedPercent);
+    BOOL tipChanged = _tcscmp(tip, g_nidMemory.szTip) != 0;
+    if (tipChanged) StringCchCopy(g_nidMemory.szTip, ARRAYSIZE(g_nidMemory.szTip), tip);
 
-    if (abs((int)usedMB - (int)g_lastUsedMB) > 100) {
-        g_lastUsedMB = usedMB;
+    DWORDLONG delta = mi->usedPhys > g_lastUsedMB ? mi->usedPhys - g_lastUsedMB
+                                                  : g_lastUsedMB - mi->usedPhys;
+    if (delta > (DWORDLONG)100 * 1024 * 1024) {     // same 100 MB threshold as before
+        g_lastUsedMB = mi->usedPhys;
         HICON hNewIcon = GeneratePieIcon(mi);
         if (hNewIcon) {
             if (g_hIconMemory) DestroyIcon(g_hIconMemory);
             g_hIconMemory = hNewIcon;
-            g_nidMemory.hIcon = g_hIconMemory;
-            Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
+            g_nidMemory.hIcon = hNewIcon;
+            Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);   // sends the new icon and tip
+            return;
         }
     }
+    if (tipChanged) Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
 }
 
-// Updates CPU usage information
+// Updates the four memory items of the context menu; MIIM_STRING keeps the
+// Used/Free bitmaps, so no per-tick bitmap re-application is needed
+void UpdateMenuMemory(MEMINFO *mi) {
+    TCHAR buf[64];
+    StringCchPrintf(buf, 64, g_lang->menu_used,   (UINT)(mi->usedPhys / (1024 * 1024)));
+    SetMenuText(g_hMenu, ID_MENU_USED, buf);
+    StringCchPrintf(buf, 64, g_lang->menu_free,   (UINT)(mi->availPhys / (1024 * 1024)));
+    SetMenuText(g_hMenu, ID_MENU_FREE, buf);
+    StringCchPrintf(buf, 64, g_lang->menu_cached, (UINT)(mi->cachedBytes / (1024 * 1024)));
+    SetMenuText(g_hMenu, ID_MENU_CACHED, buf);
+    StringCchPrintf(buf, 64, g_lang->menu_swap,   (UINT)(mi->swapUsed / (1024 * 1024)));
+    SetMenuText(g_hMenu, ID_MENU_SWAP, buf);
+}
+
+// Updates CPU usage information and computes avg/max in the same pass.
+// The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateCpuInfo(CPUINFO *ci) {
     ci->core_count = g_coreCount;
-    if (!g_pdhQueryCpu || !g_pdhCountersCpu) return;
-
-    PdhCollectQueryData(g_pdhQueryCpu);
-
-    for (int i = 0; i < g_coreCount; i++) {
-        PDH_FMT_COUNTERVALUE cv;
-        if (PdhGetFormattedCounterValue(g_pdhCountersCpu[i], PDH_FMT_DOUBLE, NULL, &cv) == ERROR_SUCCESS) {
-            ci->percents[i] = max(0.0, min(100.0, cv.doubleValue));
-        }
-    }
-}
-
-// Checks if CPU usage has changed significantly
-BOOL CpuUsageChanged(CPUINFO *ci) {
-    for (int i = 0; i < ci->core_count; i++) {
-        if (fabs(ci->percents[i] - g_lastPercents[i]) > 1.5) return TRUE;
-    }
-    return FALSE;
-}
-
-// Generates a bar chart icon for CPU usage
-HICON GenerateBarIcon(CPUINFO *ci) {
-    int numCores = ci->core_count;
-    int maxWidth = ICON_SIZE;
-    int groupSize = numCores > maxWidth ? (numCores + maxWidth - 1) / maxWidth : 1;
-    int numGroups = (numCores + groupSize - 1) / groupSize;
-
-    double groupPercents[MAX_CORES] = {0};
-    
-    for (int i = 0; i < numCores; i++) {
-        groupPercents[i / groupSize] += ci->percents[i];
-    }
-    for (int i = 0; i < numGroups; i++) {
-        groupPercents[i] /= groupSize;
-    }
-
-    int barWidth = maxWidth / numGroups;
-    if (barWidth < 1) barWidth = 1;
-    int imgWidth = barWidth * numGroups;
-    int imgHeight = ICON_SIZE;
-
-    BITMAPINFO bmi = { sizeof(BITMAPINFOHEADER), imgWidth, -imgHeight, 1, 32, BI_RGB };
-    HDC hdcScreen = GetDC(NULL);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    void *pBits;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-    HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
-
-    // Initialize background with transparent pixels
-    BYTE *pPixel = (BYTE *)pBits;
-    for (int y = 0; y < imgHeight; y++) {
-        for (int x = 0; x < imgWidth; x++) {
-            pPixel[0] = pPixel[1] = pPixel[2] = pPixel[3] = 0;
-            pPixel += 4;
-        }
-    }
-
-    HBITMAP hMonoBmp = CreateBitmap(imgWidth, imgHeight, 1, 1, NULL);
-    HDC hdcMask = CreateCompatibleDC(NULL);
-    HGDIOBJ hOldMaskBmp = SelectObject(hdcMask, hMonoBmp);
-    PatBlt(hdcMask, 0, 0, imgWidth, imgHeight, WHITENESS);
-
-    for (int i = 0; i < numGroups; i++) {
-        int barHeight = max(1, (int)(groupPercents[i] * imgHeight / 100.0));
-        int xStart = i * barWidth;
-        int xEnd = xStart + barWidth;
-
-        pPixel = (BYTE *)pBits + (imgHeight - barHeight) * imgWidth * 4 + xStart * 4;
-        for (int y = imgHeight - barHeight; y < imgHeight; y++) {
-            for (int x = xStart; x < xEnd; x++) {
-                BYTE *pixel = pPixel + (x - xStart) * 4;
-                COLORREF barColor = (groupPercents[i] > 50)
-                    ? RGB(200, 100, 100)
-                    : RGB(100, 200, 100);
-                pixel[0] = GetBValue(barColor);
-                pixel[1] = GetGValue(barColor);
-                pixel[2] = GetRValue(barColor);
-                pixel[3] = 255;
+    if (g_pdhOk) {
+        for (int i = 0; i < g_coreCount; i++) {
+            PDH_FMT_COUNTERVALUE cv;
+            if (PdhGetFormattedCounterValue(g_pdhCountersCpu[i], PDH_FMT_DOUBLE, NULL, &cv) == ERROR_SUCCESS) {
+                double v = cv.doubleValue;
+                ci->percents[i] = v < 0.0 ? 0.0 : (v > 100.0 ? 100.0 : v);
             }
-            pPixel += imgWidth * 4;
         }
-
-        RECT rect = { xStart, imgHeight - barHeight, xEnd, imgHeight };
-        HBRUSH hBlackBrush = CreateSolidBrush(RGB(0, 0, 0));
-        FillRect(hdcMask, &rect, hBlackBrush);
-        DeleteObject(hBlackBrush);
     }
 
-    ICONINFO ii = { TRUE, 0, 0, hMonoBmp, hBmp };
-    HICON hIcon = CreateIconIndirect(&ii);
+    double sum = 0.0, m = 0.0;
+    int mc = 0;
+    for (int i = 0; i < ci->core_count; i++) {
+        sum += ci->percents[i];
+        if (i == 0 || ci->percents[i] > m) { m = ci->percents[i]; mc = i; }
+    }
+    ci->avg = ci->core_count ? sum / ci->core_count : 0.0;
+    ci->max = m;
+    ci->max_core = mc;
+}
 
-    SelectObject(hdcMem, hOldBmp);
-    SelectObject(hdcMask, hOldMaskBmp);
-    DeleteDC(hdcMem);
-    DeleteDC(hdcMask);
-    DeleteObject(hBmp);
-    DeleteObject(hMonoBmp);
-    ReleaseDC(NULL, hdcScreen);
+// Generates a bar chart icon for CPU usage (direct pixel writes, no DCs).
+// Returns NULL when the visible bars are identical to the previously rendered
+// icon, so the DIB + icon + tray update is skipped entirely.
+HICON GenerateBarIcon(CPUINFO *ci) {
+    int numCores = ci->core_count > 0 ? ci->core_count : 1;
+    int numGroups = numCores < ICON_SIZE ? numCores : ICON_SIZE;
+    int bars[ICON_SIZE];                       // packed bar height + color flag
 
+    for (int g = 0; g < numGroups; g++) {
+        int c0 = g * numCores / numGroups, c1 = (g + 1) * numCores / numGroups;  // c1 > c0
+        double sum = 0.0;
+        for (int i = c0; i < c1; i++) sum += ci->percents[i];
+        double avg = sum / (c1 - c0);
+
+        int h = (int)(avg * ICON_SIZE / 100.0);
+        if (h < 1) h = 1;
+        if (h > ICON_SIZE) h = ICON_SIZE;
+        bars[g] = h | (avg > 50.0 ? 256 : 0);
+    }
+
+    if (memcmp(bars, g_lastBars, numGroups * sizeof(int)) == 0)
+        return NULL;                           // nothing visible changed
+
+    DWORD pix[ICON_SIZE * ICON_SIZE];
+    memset(pix, 0, sizeof(pix));               // transparent background
+    for (int g = 0; g < numGroups; g++) {
+        int h = bars[g] & 0xFF;
+        DWORD color = (bars[g] & 256) ? 0xFFC86464u : 0xFF64C864u;   // RGB(200,100,100) / RGB(100,200,100)
+        int x0 = g * ICON_SIZE / numGroups, x1 = (g + 1) * ICON_SIZE / numGroups;
+        for (int y = ICON_SIZE - h; y < ICON_SIZE; y++)
+            for (int x = x0; x < x1; x++)
+                pix[y * ICON_SIZE + x] = color;
+    }
+
+    HICON hIcon = CreateArgbIcon(pix);
+    if (hIcon) memcpy(g_lastBars, bars, numGroups * sizeof(int));  // on failure retry next tick
     return hIcon;
 }
 
-// Updates the system tray CPU icon and menu
+// Updates the system tray CPU icon; Shell_NotifyIcon is only called when
+// the tooltip or the icon actually changed
 void UpdateTrayCpu(CPUINFO *ci) {
-    TCHAR buf[64];
-    double avg = 0.0;
-    double maxVal = 0.0;
-    int maxCore = 0;
+    TCHAR tip[128];
+    StringCchPrintf(tip, 128, g_lang->tooltip_cpu_avg, ci->avg);
+    BOOL tipChanged = _tcscmp(tip, g_nidCpu.szTip) != 0;
+    if (tipChanged) StringCchCopy(g_nidCpu.szTip, ARRAYSIZE(g_nidCpu.szTip), tip);
 
-    for (int i = 0; i < ci->core_count; i++) {
-        avg += ci->percents[i];
-        if (i == 0 || ci->percents[i] > maxVal) {
-            maxVal = ci->percents[i];
-            maxCore = i;
-        }
+    HICON hNewIcon = GenerateBarIcon(ci);      // NULL when the bars did not change
+    if (hNewIcon) {
+        if (g_hIconCpu) DestroyIcon(g_hIconCpu);
+        g_hIconCpu = hNewIcon;
+        g_nidCpu.hIcon = hNewIcon;
+        Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);   // sends the new icon and tip
+        return;
     }
-    avg /= ci->core_count ? ci->core_count : 1;
+    if (tipChanged) Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
+}
 
-    // Update menu items based on display mode
+// Updates the CPU items of the context menu for the current display mode
+// (stats come precomputed from UpdateCpuInfo)
+void UpdateMenuCpu(CPUINFO *ci) {
+    TCHAR buf[64];
     if (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL) {
         for (int i = 0; i < ci->core_count; i++) {
             StringCchPrintf(buf, 64, g_lang->cpu_core_format, i + 1, ci->percents[i]);
-            ModifyMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
+            SetMenuText(g_hMenu, ID_MENU_CPU_BASE + i, buf);
         }
     } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG) {
-        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, avg);
-        ModifyMenu(g_hMenu, ID_MENU_CPU_BASE, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
-    } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX) {
-        StringCchPrintf(buf, 64, g_lang->cpu_max_format, maxVal, maxCore + 1);
-        ModifyMenu(g_hMenu, ID_MENU_CPU_BASE, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
-    }
-
-    StringCchPrintf(g_nidCpu.szTip, sizeof(g_nidCpu.szTip)/sizeof(TCHAR), g_lang->tooltip_cpu_avg, avg);
-    Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
-
-    if (CpuUsageChanged(ci)) {
-        for (int i = 0; i < ci->core_count; i++) g_lastPercents[i] = ci->percents[i];
-        HICON hNewIcon = GenerateBarIcon(ci);
-        if (hNewIcon) {
-            if (g_hIconCpu) DestroyIcon(g_hIconCpu);
-            g_hIconCpu = hNewIcon;
-            g_nidCpu.hIcon = g_hIconCpu;
-            Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
-        }
+        StringCchPrintf(buf, 64, g_lang->cpu_avg_format, ci->avg);
+        SetMenuText(g_hMenu, ID_MENU_CPU_BASE, buf);
+    } else {
+        StringCchPrintf(buf, 64, g_lang->cpu_max_format, ci->max, ci->max_core + 1);
+        SetMenuText(g_hMenu, ID_MENU_CPU_BASE, buf);
     }
 }
 
@@ -828,15 +742,15 @@ BOOL LoadLanguageSelectionFromRegistry(void) {
 
 // Refreshes menu text with current language
 void RefreshMenuText(void) {
-    ModifyMenu(g_hMenu, ID_MENU_ABOUT, MF_BYCOMMAND | MF_STRING, ID_MENU_ABOUT, g_lang->menu_about);
-    ModifyMenu(g_hMenu, ID_MENU_AUTOSTART, MF_BYCOMMAND | MF_STRING | (g_autoStartChecked ? MF_CHECKED : 0),
-        ID_MENU_AUTOSTART, g_lang->menu_autostart);
-    ModifyMenu(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, MF_BYCOMMAND | MF_STRING | (g_showMemoryIcon ? MF_CHECKED : 0),
-        ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
-    ModifyMenu(g_hMenu, ID_MENU_SHOW_CPU_ICON, MF_BYCOMMAND | MF_STRING | (g_showCpuIcon ? MF_CHECKED : 0),
-        ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
-    ModifyMenu(g_hMenu, ID_MENU_REFRESH_INTERVAL, MF_BYCOMMAND | MF_STRING, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
-    ModifyMenu(g_hMenu, ID_MENU_EXIT, MF_BYCOMMAND | MF_STRING, ID_MENU_EXIT, g_lang->menu_exit);
+    SetMenuText(g_hMenu, ID_MENU_ABOUT, g_lang->menu_about);
+    SetMenuText(g_hMenu, ID_MENU_AUTOSTART, g_lang->menu_autostart);
+    SetMenuText(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
+    SetMenuText(g_hMenu, ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
+    SetMenuText(g_hMenu, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
+    SetMenuText(g_hMenu, ID_MENU_EXIT, g_lang->menu_exit);
+    CheckMenuItem(g_hMenu, ID_MENU_AUTOSTART, MF_BYCOMMAND | (g_autoStartChecked ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, MF_BYCOMMAND | (g_showMemoryIcon ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hMenu, ID_MENU_SHOW_CPU_ICON, MF_BYCOMMAND | (g_showCpuIcon ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_EN, MF_BYCOMMAND | (g_lang == &lang_en ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_DE, MF_BYCOMMAND | (g_lang == &lang_de ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_IT, MF_BYCOMMAND | (g_lang == &lang_it ? MF_CHECKED : MF_UNCHECKED));
@@ -859,9 +773,9 @@ void RefreshMenuText(void) {
     miiCpu.hSubMenu = g_hCpuDisplayMenu;
     SetMenuItemInfo(g_hMenu, (UINT_PTR)g_hCpuDisplayMenu, FALSE, &miiCpu);
 
-    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_ALL, g_lang->menu_cpu_show_all);
-    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_AVG, g_lang->menu_cpu_show_avg);
-    ModifyMenu(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_SHOW_MAX, g_lang->menu_cpu_show_max);
+    SetMenuText(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, g_lang->menu_cpu_show_all);
+    SetMenuText(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, g_lang->menu_cpu_show_avg);
+    SetMenuText(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, g_lang->menu_cpu_show_max);
 
     CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_ALL, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG ? MF_CHECKED : MF_UNCHECKED));
@@ -1034,16 +948,16 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
                 }
             }
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-                if (hLinkFont) DeleteObject(hLinkFont);
-                if (hBrush) DeleteObject(hBrush);
+                if (hLinkFont) { DeleteObject(hLinkFont); hLinkFont = NULL; }
+                if (hBrush) { DeleteObject(hBrush); hBrush = NULL; }
                 EndDialog(hwndDlg, LOWORD(wParam));
                 return TRUE;
             }
             break;
         case WM_DESTROY:
         case WM_CLOSE:
-            if (hLinkFont) DeleteObject(hLinkFont);
-            if (hBrush) DeleteObject(hBrush);
+            if (hLinkFont) { DeleteObject(hLinkFont); hLinkFont = NULL; }
+            if (hBrush) { DeleteObject(hBrush); hBrush = NULL; }
             if (uMsg == WM_CLOSE) EndDialog(hwndDlg, IDCANCEL);
             return TRUE;
     }
@@ -1113,10 +1027,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_TIMER:
+        g_pdhOk = g_pdhQuery && PdhCollectQueryData(g_pdhQuery) == ERROR_SUCCESS;   // one sample for all counters
         UpdateMemoryInfo(&mi);
-        UpdateTrayMemory(&mi);
         UpdateCpuInfo(&ci);
+        UpdateTrayMemory(&mi);
         UpdateTrayCpu(&ci);
+        if (g_menuOpen) {              // the visible menu text stays live
+            UpdateMenuMemory(&mi);
+            UpdateMenuCpu(&ci);
+        }
         break;
 
     case WM_TRAYICON:
@@ -1124,8 +1043,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt;
             GetCursorPos(&pt);
             SetForegroundWindow(hWnd);
+            UpdateMenuMemory(&mi);
+            UpdateMenuCpu(&ci);
             TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
         }
+        break;
+
+    case WM_ENTERMENULOOP:            // menu texts are refreshed only while visible
+        g_menuOpen = TRUE;
+        break;
+
+    case WM_EXITMENULOOP:
+        g_menuOpen = FALSE;
         break;
 
     case WM_COMMAND:
@@ -1219,12 +1148,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
         if (g_hIconMemory) DestroyIcon(g_hIconMemory);
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
-        if (g_hMenu) DestroyMenu(g_hMenu);
-        if (g_hLangMenu) DestroyMenu(g_hLangMenu);
-        if (g_hCpuDisplayMenu) DestroyMenu(g_hCpuDisplayMenu);
-        if (g_pdhQueryMemory) PdhCloseQuery(g_pdhQueryMemory);
-        if (g_pdhQueryCpu) PdhCloseQuery(g_pdhQueryCpu);
-        if (g_pdhCountersCpu) free(g_pdhCountersCpu);
+        if (g_hMenu) DestroyMenu(g_hMenu);      // also destroys the submenus
+        if (g_pdhQuery) PdhCloseQuery(g_pdhQuery);
         PostQuitMessage(0);
         break;
 
@@ -1243,6 +1168,8 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     }
 
     g_hInst = hInstance;
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };   // trackbar in the refresh dialog
+    InitCommonControlsEx(&icc);
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
@@ -1321,30 +1248,21 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     g_nidCpu.hIcon = g_hIconCpu;
     Shell_NotifyIcon(NIM_ADD, &g_nidCpu);
 
-    // Initialize PDH counters for memory
-    PdhOpenQuery(NULL, 0, &g_pdhQueryMemory);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Cache Bytes"), 0, &g_pdhCounterMemory);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Modified Page List Bytes"), 0, &g_pdhCounterModifiedPageListBytes);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Standby Cache Core Bytes"), 0, &g_pdhCounterStandbyCoreBytes);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Standby Cache Normal Priority Bytes"), 0, &g_pdhCounterStandbyNormalBytes);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Standby Cache Reserve Bytes"), 0, &g_pdhCounterStandbyReserveBytes);
-    PdhAddEnglishCounter(g_pdhQueryMemory, _T("\\Memory\\Committed Bytes"), 0, &g_pdhCounterCommittedBytes);
-    for (int i = 0; i < 3; i++) {
-        PdhCollectQueryData(g_pdhQueryMemory);
-        Sleep(100);
-    }
-
-    // Initialize PDH counters for CPU
-    PdhOpenQuery(NULL, 0, &g_pdhQueryCpu);
-    g_pdhCountersCpu = (PDH_HCOUNTER*)malloc(g_coreCount * sizeof(PDH_HCOUNTER));
-    for (int i = 0; i < g_coreCount; i++) {
-        TCHAR path[128];
-        StringCchPrintf(path, 128, _T("\\Processor(%d)\\%% Processor Time"), i);
-        PdhAddEnglishCounter(g_pdhQueryCpu, path, 0, &g_pdhCountersCpu[i]);
-    }
-    for (int i = 0; i < 3; i++) {
-        PdhCollectQueryData(g_pdhQueryCpu);
-        Sleep(100);
+    // Initialize PDH counters: a single query holds every memory and CPU
+    // counter. The one priming collect makes the rate counters valid from the
+    // first timer tick on, so no Sleep() loops are needed at startup.
+    if (PdhOpenQuery(NULL, 0, &g_pdhQuery) == ERROR_SUCCESS) {
+        for (int i = 0; i < CACHE_COUNTERS; i++)
+            PdhAddEnglishCounter(g_pdhQuery, kCachePaths[i], 0, &g_pdhCounterCache[i]);
+        PdhAddEnglishCounter(g_pdhQuery, _T("\\Memory\\Committed Bytes"), 0, &g_pdhCounterCommittedBytes);
+        for (int i = 0; i < g_coreCount; i++) {
+            TCHAR path[128];
+            StringCchPrintf(path, 128, _T("\\Processor(%d)\\%% Processor Time"), i);
+            PdhAddEnglishCounter(g_pdhQuery, path, 0, &g_pdhCountersCpu[i]);
+        }
+        PdhCollectQueryData(g_pdhQuery);
+    } else {
+        g_pdhQuery = NULL;
     }
 
     if (!LoadLanguageSelectionFromRegistry()) {
@@ -1376,6 +1294,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_AVG, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX ? MF_CHECKED : MF_UNCHECKED));
     UpdateIconVisibility();
+
+    // First refresh immediately instead of waiting one full interval: the
+    // tray icons, menu and the PDH baseline sample above are all ready, so
+    // the default icon is replaced right away (e.g. no 5 s blank at 5 s).
+    SendMessage(g_hWnd, WM_TIMER, 1, 0);
 
     // Main message loop
     MSG msg;

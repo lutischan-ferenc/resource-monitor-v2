@@ -23,7 +23,7 @@ To build and run the application on Windows:
 ```sh
 # Build Resource Monitor in cmd
 \mingw32\bin\windres resource-monitor.rc -o resource-monitor_res.o
-\mingw32\bin\gcc -ffunction-sections -fdata-sections -s -o resource-monitor resource-monitor.c resource-monitor_res.o -lpdh -mwindows -lwinmm -Wl,--gc-sections -static-libgcc -municode
+\mingw32\bin\gcc -O2 -ffunction-sections -fdata-sections -s -o resource-monitor resource-monitor.c resource-monitor_res.o -lpdh -lcomctl32 -mwindows -lwinmm -Wl,--gc-sections -static-libgcc -municode
 ```
 
 Or simply run:
