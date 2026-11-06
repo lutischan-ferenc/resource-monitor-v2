@@ -4,6 +4,14 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <pdh.h>
+
+/* Compatibility with older MinGW PDH headers. */
+#ifndef PDH_CSTATUS_VALID_DATA
+#define PDH_CSTATUS_VALID_DATA 0x00000000L
+#endif
+#ifndef PDH_CSTATUS_NEW_DATA
+#define PDH_CSTATUS_NEW_DATA  0x00000001L
+#endif
 #include <tchar.h>
 #include <strsafe.h>
 #include <winreg.h>
@@ -12,8 +20,7 @@
 #include <stdlib.h>
 #include <commctrl.h>
 
-#pragma comment(lib, "pdh.lib")
-#pragma comment(lib, "comctl32.lib")
+// MinGW link libraries: -lpdh -lgdi32 -lcomctl32 -lshell32 -ladvapi32
 
 // System tray and menu constants
 #define WM_TRAYICON (WM_USER + 1)
@@ -53,7 +60,9 @@
 #define CPU_DISPLAY_MODE_MAX 2
 #define MAX_CORES 256
 #define ICON_SIZE 32
-#define CACHE_COUNTERS 5
+#define CACHE_COUNTERS 4
+#define MIN_REFRESH_INTERVAL 500
+#define MAX_REFRESH_INTERVAL 5000
 #define AUTO_START_REG_VALUE _T("ResourceMonitor")
 
 // Structure to hold memory usage information
@@ -105,10 +114,10 @@ typedef struct {
 // Localization data
 static LANG lang_en = {
     _T("About Resource Monitor"),
-    _T("Used: %u MB"),
-    _T("Free: %u MB"),
-    _T("Cached: %u MB"),
-    _T("Swap: %u MB"),
+    _T("Used: %s MB"),
+    _T("Free: %s MB"),
+    _T("Cached: %s MB"),
+    _T("Swap: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Start on System Startup"),
     _T("Language"),
@@ -130,10 +139,10 @@ static LANG lang_en = {
 
 static LANG lang_hu = {
     _T("A Resource Monitor névjegye"),
-    _T("Használt: %u MB"),
-    _T("Szabad: %u MB"),
-    _T("Gyorsítótár: %u MB"),
-    _T("Csere: %u MB"),
+    _T("Használt: %s MB"),
+    _T("Szabad: %s MB"),
+    _T("Gyorsítótár: %s MB"),
+    _T("Csere: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Rendszerindításkor indul"),
     _T("Nyelv"),
@@ -155,10 +164,10 @@ static LANG lang_hu = {
 
 static LANG lang_de = {
     _T("Über Resource Monitor"),
-    _T("Verwendet: %u MB"),
-    _T("Frei: %u MB"),
-    _T("Zwischengespeichert: %u MB"),
-    _T("Auslagerungsdatei: %u MB"),
+    _T("Verwendet: %s MB"),
+    _T("Frei: %s MB"),
+    _T("Zwischengespeichert: %s MB"),
+    _T("Auslagerungsdatei: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Beim Systemstart starten"),
     _T("Sprache"),
@@ -180,10 +189,10 @@ static LANG lang_de = {
 
 static LANG lang_it = {
     _T("Info su Resource Monitor"),
-    _T("Memoria usata: %u MB"),
-    _T("Memoria libera: %u MB"),
-    _T("Memoria cache: %u MB"),
-    _T("Memoria swap: %u MB"),
+    _T("Memoria usata: %s MB"),
+    _T("Memoria libera: %s MB"),
+    _T("Memoria cache: %s MB"),
+    _T("Memoria swap: %s MB"),
     _T("Uso CPU %d: %.2f%%"),
     _T("Esegui all'avvio del sistema"),
     _T("Lingua interfaccia"),
@@ -205,10 +214,10 @@ static LANG lang_it = {
 
 static LANG lang_es = {
     _T("Acerca de Resource Monitor"),
-    _T("Usado: %u MB"),
-    _T("Libre: %u MB"),
-    _T("En caché: %u MB"),
-    _T("Intercambio: %u MB"),
+    _T("Usado: %s MB"),
+    _T("Libre: %s MB"),
+    _T("En caché: %s MB"),
+    _T("Intercambio: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Iniciar al encender el sistema"),
     _T("Idioma"),
@@ -230,10 +239,10 @@ static LANG lang_es = {
 
 static LANG lang_fr = {
     _T("À propos de Resource Monitor"),
-    _T("Utilisé: %u MB"),
-    _T("Libre: %u MB"),
-    _T("En cache: %u MB"),
-    _T("Échange: %u MB"),
+    _T("Utilisé: %s MB"),
+    _T("Libre: %s MB"),
+    _T("En cache: %s MB"),
+    _T("Échange: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Démarrer au démarrage du système"),
     _T("Langue"),
@@ -255,10 +264,10 @@ static LANG lang_fr = {
 
 static LANG lang_ru = {
     _T("О Resource Monitor"),
-    _T("Использовано: %u MB"),
-    _T("Свободно: %u MB"),
-    _T("Кэшировано: %u MB"),
-    _T("Файл подкачки: %u MB"),
+    _T("Использовано: %s MB"),
+    _T("Свободно: %s MB"),
+    _T("Кэшировано: %s MB"),
+    _T("Файл подкачки: %s MB"),
     _T("CPU %d: %.2f%%"),
     _T("Запуск при старте системы"),
     _T("Язык"),
@@ -308,6 +317,9 @@ void ShowAboutDialog(HWND hwndParent);
 void RebuildCpuMenuItems(CPUINFO *ci);
 void SaveCpuDisplaySettingsToRegistry(void);
 void LoadCpuDisplaySettingsFromRegistry(void);
+static BOOL ReadRegistryDword(HKEY hKey, LPCTSTR valueName, DWORD *value);
+static BOOL IsPdhValueValid(const PDH_FMT_COUNTERVALUE *cv);
+static void AddTrayIcons(void);
 
 // Global variables
 static LANG *g_lang = &lang_en;
@@ -324,32 +336,38 @@ static HICON g_hIconMemory;
 static HICON g_hIconCpu;
 static BOOL g_autoStartChecked;
 static DWORD g_refreshInterval = 1000;
-static DWORDLONG g_lastUsedMB;
+static DWORDLONG g_lastUsedBytes;
 static int g_lastBars[ICON_SIZE];   // packed height+color of the bars in the last CPU icon
 static BOOL g_menuOpen;             // menu texts are only refreshed while the menu is visible
 static PDH_HQUERY g_pdhQuery;       // one query holds every counter: one collect per tick
 static BOOL g_pdhOk;
 static PDH_HCOUNTER g_pdhCounterCache[CACHE_COUNTERS];
 static PDH_HCOUNTER g_pdhCounterCommittedBytes;
+static PDH_HCOUNTER g_pdhCounterPagingUsage;
 static PDH_HCOUNTER g_pdhCountersCpu[MAX_CORES];
 static int g_coreCount;
 static BOOL g_showMemoryIcon = TRUE;
 static BOOL g_showCpuIcon = TRUE;
 static int g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
 static int screenWidth = 0, screenHeight = 0;
+static BOOL g_memoryIconAdded = FALSE;
+static BOOL g_cpuIconAdded = FALSE;
+static HANDLE g_hSingleInstanceEvent = NULL;
+static UINT g_taskbarCreatedMessage = 0;
 
 static const LPCTSTR kCachePaths[CACHE_COUNTERS] = {
-    _T("\\Memory\\Cache Bytes"),
     _T("\\Memory\\Modified Page List Bytes"),
-    _T("\\Memory\\Standby Cache Core Bytes"),
     _T("\\Memory\\Standby Cache Normal Priority Bytes"),
     _T("\\Memory\\Standby Cache Reserve Bytes"),
+    _T("\\Memory\\Standby Cache Core Bytes")
 };
 
 static const BYTE kZeroMask[(ICON_SIZE / 8) * ICON_SIZE]; // all-zero icon mask
 
 // Rebuilds the CPU section of the context menu based on display mode
 void RebuildCpuMenuItems(CPUINFO *ci) {
+    if (!g_hMenu || !g_hCpuDisplayMenu)
+        return;
     // Remove the existing CPU items (one loop over the real core count)
     for (int i = 0; i < g_coreCount; i++) {
         RemoveMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND);
@@ -375,32 +393,69 @@ void RebuildCpuMenuItems(CPUINFO *ci) {
     }
 }
 
+static BOOL IsPdhValueValid(const PDH_FMT_COUNTERVALUE *cv) {
+    return cv && (cv->CStatus == PDH_CSTATUS_VALID_DATA ||
+                  cv->CStatus == PDH_CSTATUS_NEW_DATA);
+}
+
 // Updates memory usage information using system and PDH counters.
 // The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateMemoryInfo(MEMINFO *mi) {
-    MEMORYSTATUSEX ms = { sizeof(ms) };
-    if (!GlobalMemoryStatusEx(&ms) || ms.ullTotalPhys == 0) return;
+    MEMORYSTATUSEX ms;
+    ZeroMemory(&ms, sizeof(ms));
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms) || ms.ullTotalPhys == 0)
+        return;
 
     mi->totalPhys = ms.ullTotalPhys;
     mi->availPhys = ms.ullAvailPhys;
     mi->usedPhys = mi->totalPhys - mi->availPhys;
-    mi->usedPercent = (double)mi->usedPhys / mi->totalPhys * 100.0;
-    mi->totalSwap = ms.ullTotalPageFile;
+    mi->usedPercent = (double)mi->usedPhys / (double)mi->totalPhys * 100.0;
+    mi->totalSwap = ms.ullTotalPageFile > ms.ullTotalPhys
+        ? ms.ullTotalPageFile - ms.ullTotalPhys : 0;
+    if (mi->totalSwap == 0)
+        mi->swapUsed = 0;
 
     if (g_pdhOk) {
         PDH_FMT_COUNTERVALUE cv;
-        DWORDLONG totalCached = 0;
-        for (int i = 0; i < CACHE_COUNTERS; i++) {
-            if (PdhGetFormattedCounterValue(g_pdhCounterCache[i], PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS)
-                totalCached += (DWORDLONG)cv.largeValue;
+        /* Task Manager's Cached memory is approximately the sum of the
+         * modified page list and all standby cache priority lists. Update
+         * the value only when every counter produced a valid sample, so a
+         * missing counter cannot silently produce a misleading partial sum.
+         */
+        {
+            DWORDLONG cachedTotal = 0;
+            int validCacheCounters = 0;
+
+            for (int i = 0; i < CACHE_COUNTERS; i++) {
+                if (g_pdhCounterCache[i] &&
+                    PdhGetFormattedCounterValue(g_pdhCounterCache[i], PDH_FMT_LARGE,
+                                                NULL, &cv) == ERROR_SUCCESS &&
+                    IsPdhValueValid(&cv) && cv.largeValue >= 0) {
+                    cachedTotal += (DWORDLONG)cv.largeValue;
+                    validCacheCounters++;
+                }
+            }
+
+            if (validCacheCounters == CACHE_COUNTERS)
+                mi->cachedBytes = cachedTotal;
         }
-        mi->cachedBytes = totalCached;
 
-        mi->committedBytes = (PdhGetFormattedCounterValue(g_pdhCounterCommittedBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS)
-            ? (DWORDLONG)cv.largeValue : 0;
+        if (g_pdhCounterCommittedBytes &&
+            PdhGetFormattedCounterValue(g_pdhCounterCommittedBytes, PDH_FMT_LARGE, NULL, &cv) == ERROR_SUCCESS &&
+            IsPdhValueValid(&cv) && cv.largeValue >= 0) {
+            mi->committedBytes = (DWORDLONG)cv.largeValue;
+        }
+
+        if (g_pdhCounterPagingUsage && mi->totalSwap > 0 &&
+            PdhGetFormattedCounterValue(g_pdhCounterPagingUsage, PDH_FMT_DOUBLE, NULL, &cv) == ERROR_SUCCESS &&
+            IsPdhValueValid(&cv)) {
+            double usage = cv.doubleValue;
+            if (usage < 0.0) usage = 0.0;
+            if (usage > 100.0) usage = 100.0;
+            mi->swapUsed = (DWORDLONG)((double)mi->totalSwap * usage / 100.0);
+        }
     }
-
-    mi->swapUsed = (mi->committedBytes > mi->usedPhys) ? (mi->committedBytes - mi->usedPhys) : 0;
 }
 
 // Creates a 32bpp ARGB icon from raw pixel data (no GDI device contexts)
@@ -539,11 +594,14 @@ HBITMAP CreateColorBitmap(COLORREF color, int width, int height) {
 
     void *bits = NULL;
     HBITMAP hBitmap = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (hBitmap && bits) {
-        DWORD argb = 0xFF000000u | (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color);
-        DWORD *p = (DWORD *)bits;
-        for (int i = 0; i < width * height; i++) p[i] = argb;
+    if (!hBitmap || !bits) {
+        if (hBitmap) DeleteObject(hBitmap);
+        return NULL;
     }
+
+    DWORD argb = 0xFF000000u | (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color);
+    DWORD *p = (DWORD *)bits;
+    for (int i = 0; i < width * height; i++) p[i] = argb;
     return hBitmap;
 }
 
@@ -560,37 +618,57 @@ void SetMenuText(HMENU m, UINT id, LPCTSTR text) {
 // the tooltip or the icon actually changed
 void UpdateTrayMemory(MEMINFO *mi) {
     TCHAR tip[128];
-    StringCchPrintf(tip, 128, g_lang->tooltip_memory_usage, mi->usedPercent);
+    StringCchPrintf(tip, ARRAYSIZE(tip), g_lang->tooltip_memory_usage, mi->usedPercent);
     BOOL tipChanged = _tcscmp(tip, g_nidMemory.szTip) != 0;
-    if (tipChanged) StringCchCopy(g_nidMemory.szTip, ARRAYSIZE(g_nidMemory.szTip), tip);
+    if (tipChanged)
+        StringCchCopy(g_nidMemory.szTip, ARRAYSIZE(g_nidMemory.szTip), tip);
 
-    DWORDLONG delta = mi->usedPhys > g_lastUsedMB ? mi->usedPhys - g_lastUsedMB
-                                                  : g_lastUsedMB - mi->usedPhys;
-    if (delta > (DWORDLONG)100 * 1024 * 1024) {     // same 100 MB threshold as before
-        g_lastUsedMB = mi->usedPhys;
+    DWORDLONG delta = mi->usedPhys > g_lastUsedBytes
+        ? mi->usedPhys - g_lastUsedBytes : g_lastUsedBytes - mi->usedPhys;
+    if (delta > (DWORDLONG)100 * 1024 * 1024 || !g_hIconMemory) {
         HICON hNewIcon = GeneratePieIcon(mi);
         if (hNewIcon) {
             if (g_hIconMemory) DestroyIcon(g_hIconMemory);
             g_hIconMemory = hNewIcon;
             g_nidMemory.hIcon = hNewIcon;
-            Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);   // sends the new icon and tip
+            g_lastUsedBytes = mi->usedPhys;
+            if (g_memoryIconAdded)
+                Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
             return;
         }
     }
-    if (tipChanged) Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
+    if (tipChanged && g_memoryIconAdded)
+        Shell_NotifyIcon(NIM_MODIFY, &g_nidMemory);
+}
+
+static void FormatMegabytes(TCHAR *buffer, size_t bufferCount, DWORDLONG bytes) {
+    TCHAR digits[32];
+    int pos = (int)ARRAYSIZE(digits) - 1;
+    DWORDLONG value = bytes / (1024ULL * 1024ULL);
+    digits[pos] = _T('\0');
+    do {
+        digits[--pos] = (TCHAR)(_T('0') + (value % 10));
+        value /= 10;
+    } while (value != 0 && pos > 0);
+    StringCchCopy(buffer, bufferCount, &digits[pos]);
 }
 
 // Updates the four memory items of the context menu; MIIM_STRING keeps the
 // Used/Free bitmaps, so no per-tick bitmap re-application is needed
 void UpdateMenuMemory(MEMINFO *mi) {
     TCHAR buf[64];
-    StringCchPrintf(buf, 64, g_lang->menu_used,   (UINT)(mi->usedPhys / (1024 * 1024)));
+    TCHAR value[32];
+    FormatMegabytes(value, ARRAYSIZE(value), mi->usedPhys);
+    StringCchPrintf(buf, ARRAYSIZE(buf), g_lang->menu_used, value);
     SetMenuText(g_hMenu, ID_MENU_USED, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_free,   (UINT)(mi->availPhys / (1024 * 1024)));
+    FormatMegabytes(value, ARRAYSIZE(value), mi->availPhys);
+    StringCchPrintf(buf, ARRAYSIZE(buf), g_lang->menu_free, value);
     SetMenuText(g_hMenu, ID_MENU_FREE, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_cached, (UINT)(mi->cachedBytes / (1024 * 1024)));
+    FormatMegabytes(value, ARRAYSIZE(value), mi->cachedBytes);
+    StringCchPrintf(buf, ARRAYSIZE(buf), g_lang->menu_cached, value);
     SetMenuText(g_hMenu, ID_MENU_CACHED, buf);
-    StringCchPrintf(buf, 64, g_lang->menu_swap,   (UINT)(mi->swapUsed / (1024 * 1024)));
+    FormatMegabytes(value, ARRAYSIZE(value), mi->swapUsed);
+    StringCchPrintf(buf, ARRAYSIZE(buf), g_lang->menu_swap, value);
     SetMenuText(g_hMenu, ID_MENU_SWAP, buf);
 }
 
@@ -598,10 +676,12 @@ void UpdateMenuMemory(MEMINFO *mi) {
 // The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateCpuInfo(CPUINFO *ci) {
     ci->core_count = g_coreCount;
-    if (g_pdhOk) {
-        for (int i = 0; i < g_coreCount; i++) {
+    for (int i = 0; i < g_coreCount; i++) {
+        ci->percents[i] = 0.0;
+        if (g_pdhOk && g_pdhCountersCpu[i]) {
             PDH_FMT_COUNTERVALUE cv;
-            if (PdhGetFormattedCounterValue(g_pdhCountersCpu[i], PDH_FMT_DOUBLE, NULL, &cv) == ERROR_SUCCESS) {
+            if (PdhGetFormattedCounterValue(g_pdhCountersCpu[i], PDH_FMT_DOUBLE, NULL, &cv) == ERROR_SUCCESS &&
+                IsPdhValueValid(&cv)) {
                 double v = cv.doubleValue;
                 ci->percents[i] = v < 0.0 ? 0.0 : (v > 100.0 ? 100.0 : v);
             }
@@ -671,10 +751,12 @@ void UpdateTrayCpu(CPUINFO *ci) {
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
         g_hIconCpu = hNewIcon;
         g_nidCpu.hIcon = hNewIcon;
-        Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);   // sends the new icon and tip
+        if (g_cpuIconAdded)
+            Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);   // sends the new icon and tip
         return;
     }
-    if (tipChanged) Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
+    if (tipChanged && g_cpuIconAdded)
+        Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
 }
 
 // Updates the CPU items of the context menu for the current display mode
@@ -720,8 +802,8 @@ void SaveLanguageSelectionToRegistry(void) {
 BOOL LoadLanguageSelectionFromRegistry(void) {
     HKEY hKey;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD langId, dataSize = sizeof(DWORD);
-        if (RegQueryValueEx(hKey, _T("Language"), NULL, NULL, (LPBYTE)&langId, &dataSize) == ERROR_SUCCESS) {
+        DWORD langId;
+        if (ReadRegistryDword(hKey, _T("Language"), &langId)) {
             switch (langId) {
                 case ID_MENU_LANG_EN: g_lang = &lang_en; break;
                 case ID_MENU_LANG_HU: g_lang = &lang_hu; break;
@@ -758,7 +840,7 @@ void RefreshMenuText(void) {
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_FR, MF_BYCOMMAND | (g_lang == &lang_fr ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_HU, MF_BYCOMMAND | (g_lang == &lang_hu ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_RU, MF_BYCOMMAND | (g_lang == &lang_ru ? MF_CHECKED : MF_UNCHECKED));
-    
+
     MENUITEMINFO mii = {0};
     mii.cbSize = sizeof(MENUITEMINFO);
     mii.fMask = MIIM_STRING | MIIM_SUBMENU;
@@ -784,6 +866,17 @@ void RefreshMenuText(void) {
     RebuildCpuMenuItems(NULL);
 }
 
+static BOOL ReadRegistryDword(HKEY hKey, LPCTSTR valueName, DWORD *value) {
+    DWORD type = 0;
+    DWORD size = sizeof(DWORD);
+    DWORD data = 0;
+    if (RegQueryValueEx(hKey, valueName, NULL, &type, (LPBYTE)&data, &size) != ERROR_SUCCESS ||
+        type != REG_DWORD || size != sizeof(DWORD))
+        return FALSE;
+    *value = data;
+    return TRUE;
+}
+
 // Checks if autostart is enabled
 BOOL IsAutoStartEnabled(void) {
     HKEY hKey;
@@ -792,7 +885,10 @@ BOOL IsAutoStartEnabled(void) {
     BOOL result = FALSE;
 
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        if (RegQueryValueEx(hKey, AUTO_START_REG_VALUE, NULL, NULL, (LPBYTE)szValue, &dwSize) == ERROR_SUCCESS) {
+        DWORD type = 0;
+        if (RegQueryValueEx(hKey, AUTO_START_REG_VALUE, NULL, &type, (LPBYTE)szValue, &dwSize) == ERROR_SUCCESS &&
+            (type == REG_SZ || type == REG_EXPAND_SZ) && dwSize >= sizeof(TCHAR)) {
+            szValue[MAX_PATH - 1] = _T('\0');
             result = _tcslen(szValue) > 0;
         }
         RegCloseKey(hKey);
@@ -821,9 +917,27 @@ void SetAutoStart(BOOL enable) {
 }
 
 // Updates visibility of system tray icons
+static void AddTrayIcons(void) {
+    if (g_showMemoryIcon && !g_memoryIconAdded)
+        g_memoryIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidMemory);
+    if (g_showCpuIcon && !g_cpuIconAdded)
+        g_cpuIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidCpu);
+}
+
 void UpdateIconVisibility(void) {
-    Shell_NotifyIcon(g_showMemoryIcon ? NIM_ADD : NIM_DELETE, &g_nidMemory);
-    Shell_NotifyIcon(g_showCpuIcon ? NIM_ADD : NIM_DELETE, &g_nidCpu);
+    if (g_showMemoryIcon && !g_memoryIconAdded)
+        g_memoryIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidMemory);
+    else if (!g_showMemoryIcon && g_memoryIconAdded) {
+        Shell_NotifyIcon(NIM_DELETE, &g_nidMemory);
+        g_memoryIconAdded = FALSE;
+    }
+
+    if (g_showCpuIcon && !g_cpuIconAdded)
+        g_cpuIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidCpu);
+    else if (!g_showCpuIcon && g_cpuIconAdded) {
+        Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
+        g_cpuIconAdded = FALSE;
+    }
 }
 
 // Saves icon visibility settings to the registry
@@ -841,15 +955,17 @@ void SaveMenuStateToRegistry(void) {
 // Loads icon visibility settings from the registry
 void LoadMenuStateFromRegistry(void) {
     HKEY hKey;
+    DWORD value;
     g_showMemoryIcon = g_showCpuIcon = TRUE;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD showMemoryIcon = 1, showCpuIcon = 1, dataSize = sizeof(DWORD);
-        RegQueryValueEx(hKey, _T("ShowMemoryIcon"), NULL, NULL, (LPBYTE)&showMemoryIcon, &dataSize);
-        RegQueryValueEx(hKey, _T("ShowCpuIcon"), NULL, NULL, (LPBYTE)&showCpuIcon, &dataSize);
-        g_showMemoryIcon = showMemoryIcon != 0;
-        g_showCpuIcon = showCpuIcon != 0;
+        if (ReadRegistryDword(hKey, _T("ShowMemoryIcon"), &value))
+            g_showMemoryIcon = value != 0;
+        if (ReadRegistryDword(hKey, _T("ShowCpuIcon"), &value))
+            g_showCpuIcon = value != 0;
         RegCloseKey(hKey);
     }
+    if (!g_showMemoryIcon && !g_showCpuIcon)
+        g_showMemoryIcon = TRUE;
 }
 
 // Saves the CPU display mode to the registry
@@ -865,11 +981,11 @@ void SaveCpuDisplaySettingsToRegistry(void) {
 // Loads the CPU display mode from the registry
 void LoadCpuDisplaySettingsFromRegistry(void) {
     HKEY hKey;
+    DWORD cpuMode;
+    g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD dataSize = sizeof(DWORD);
-        DWORD cpuMode = CPU_DISPLAY_MODE_ALL;
-        RegQueryValueEx(hKey, _T("CpuDisplayMode"), NULL, NULL, (LPBYTE)&cpuMode, &dataSize);
-        g_cpuDisplayMode = (int)cpuMode;
+        if (ReadRegistryDword(hKey, _T("CpuDisplayMode"), &cpuMode) && cpuMode <= CPU_DISPLAY_MODE_MAX)
+            g_cpuDisplayMode = (int)cpuMode;
         RegCloseKey(hKey);
     }
 }
@@ -886,9 +1002,12 @@ void SaveRefreshIntervalToRegistry(void) {
 // Loads the refresh interval from the registry
 void LoadRefreshIntervalFromRegistry(void) {
     HKEY hKey;
+    DWORD interval;
+    g_refreshInterval = 1000;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD dataSize = sizeof(DWORD);
-        RegQueryValueEx(hKey, _T("RefreshInterval"), NULL, NULL, (LPBYTE)&g_refreshInterval, &dataSize);
+        if (ReadRegistryDword(hKey, _T("RefreshInterval"), &interval) &&
+            interval >= MIN_REFRESH_INTERVAL && interval <= MAX_REFRESH_INTERVAL)
+            g_refreshInterval = interval;
         RegCloseKey(hKey);
     }
 }
@@ -907,11 +1026,14 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
         case WM_INITDIALOG: {
             HFONT hFont = (HFONT)SendDlgItemMessage(hwndDlg, IDC_WEBSITE, WM_GETFONT, 0, 0);
             LOGFONT lf;
-            GetObject(hFont, sizeof(LOGFONT), &lf);
-            lf.lfUnderline = TRUE;
-            hLinkFont = CreateFontIndirect(&lf);
-            SendDlgItemMessage(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
-            SendDlgItemMessage(hwndDlg, IDC_COFFEE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
+            if (hFont && GetObject(hFont, sizeof(LOGFONT), &lf) == sizeof(LOGFONT)) {
+                lf.lfUnderline = TRUE;
+                hLinkFont = CreateFontIndirect(&lf);
+                if (hLinkFont) {
+                    SendDlgItemMessage(hwndDlg, IDC_WEBSITE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
+                    SendDlgItemMessage(hwndDlg, IDC_COFFEE, WM_SETFONT, (WPARAM)hLinkFont, (LPARAM)TRUE);
+                }
+            }
 
             hBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
 
@@ -921,6 +1043,13 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
             int dlgHeight = rect.bottom - rect.top;
             int xPos = (screenWidth - dlgWidth) / 2;
             int yPos = (screenHeight - dlgHeight) / 2;
+            if (g_hWnd) {
+                RECT ownerRect;
+                if (GetWindowRect(g_hWnd, &ownerRect)) {
+                    xPos = ownerRect.left + ((ownerRect.right - ownerRect.left) - dlgWidth) / 2;
+                    yPos = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - dlgHeight) / 2;
+                }
+            }
             SetWindowPos(hwndDlg, NULL, xPos, yPos, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
             return TRUE;
         }
@@ -941,7 +1070,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
                  if (LOWORD(wParam) == IDC_WEBSITE) {
                     ShellExecute(NULL, _T("open"), _T("https://github.com/lutischan-ferenc/resource-monitor-v2"), NULL, NULL, SW_SHOWNORMAL);
                     return TRUE;
-                } 
+                }
                 if (LOWORD(wParam) == IDC_COFFEE) {
                     ShellExecute(NULL, _T("open"), _T("https://www.buymeacoffee.com/lutischanf"), NULL, NULL, SW_SHOWNORMAL);
                     return TRUE;
@@ -976,7 +1105,9 @@ INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             SendMessage(hSlider, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(0, 18));
             SendMessage(hSlider, TBM_SETPAGESIZE, 0, (LPARAM)1);
 
-            int pos = (g_refreshInterval - 500) / 250;
+            int pos = (int)((g_refreshInterval - MIN_REFRESH_INTERVAL) / 250);
+            if (pos < 0) pos = 0;
+            if (pos > 18) pos = 18;
             SendMessage(hSlider, TBM_SETPOS, (WPARAM)TRUE, (LPARAM)pos);
 
             TCHAR buf[32];
@@ -988,7 +1119,7 @@ INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             HWND hSlider = (HWND)lParam;
             if (GetDlgCtrlID(hSlider) == IDC_SLIDER_REFRESH_INTERVAL) {
                 int pos = SendMessage(hSlider, TBM_GETPOS, 0, 0);
-                int value = 500 + pos * 250;
+                int value = MIN_REFRESH_INTERVAL + pos * 250;
                 TCHAR buf[32];
                 StringCchPrintf(buf, 32, _T("%d ms"), value);
                 SetDlgItemText(hwndDlg, IDC_STATIC_REFRESH_VALUE, buf);
@@ -999,8 +1130,11 @@ INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             if (LOWORD(wParam) == IDOK) {
                 HWND hSlider = GetDlgItem(hwndDlg, IDC_SLIDER_REFRESH_INTERVAL);
                 int pos = SendMessage(hSlider, TBM_GETPOS, 0, 0);
-                g_refreshInterval = 500 + pos * 250;
-                SetTimer(g_hWnd, 1, g_refreshInterval, NULL);
+                g_refreshInterval = MIN_REFRESH_INTERVAL + (DWORD)pos * 250;
+                if (SetTimer(g_hWnd, 1, g_refreshInterval, NULL) == 0) {
+                    MessageBox(hwndDlg, _T("Unable to update the refresh timer."), _T("Error"), MB_OK | MB_ICONERROR);
+                    return TRUE;
+                }
                 SaveRefreshIntervalToRegistry();
                 EndDialog(hwndDlg, LOWORD(wParam));
                 return TRUE;
@@ -1019,11 +1153,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static MEMINFO mi;
     static CPUINFO ci;
 
+    if (g_taskbarCreatedMessage && msg == g_taskbarCreatedMessage) {
+        g_memoryIconAdded = FALSE;
+        g_cpuIconAdded = FALSE;
+        AddTrayIcons();
+        return 0;
+    }
+
     switch (msg) {
     case WM_CREATE:
         g_hWnd = hWnd;
         LoadRefreshIntervalFromRegistry();
-        SetTimer(hWnd, 1, g_refreshInterval, NULL);
+        if (SetTimer(hWnd, 1, g_refreshInterval, NULL) == 0) {
+            MessageBox(hWnd, _T("Unable to create the refresh timer."), _T("Error"), MB_OK | MB_ICONERROR);
+            return -1;
+        }
         break;
 
     case WM_TIMER:
@@ -1046,6 +1190,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateMenuMemory(&mi);
             UpdateMenuCpu(&ci);
             TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+            PostMessage(hWnd, WM_NULL, 0, 0);
         }
         break;
 
@@ -1099,7 +1244,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CheckMenuItem(g_hMenu, ID_MENU_AUTOSTART, MF_BYCOMMAND | (g_autoStartChecked ? MF_CHECKED : MF_UNCHECKED));
             break;
         case ID_MENU_EXIT:
-            PostQuitMessage(0);
+            DestroyWindow(hWnd);
             break;
         case ID_MENU_SHOW_MEMORY_ICON:
             if (g_showMemoryIcon && !g_showCpuIcon) break;
@@ -1143,13 +1288,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_DESTROY:
+        KillTimer(hWnd, 1);
         CleanupMenuIcons();
-        Shell_NotifyIcon(NIM_DELETE, &g_nidMemory);
-        Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
+        if (g_memoryIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidMemory);
+        if (g_cpuIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
+        g_memoryIconAdded = g_cpuIconAdded = FALSE;
         if (g_hIconMemory) DestroyIcon(g_hIconMemory);
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
         if (g_hMenu) DestroyMenu(g_hMenu);      // also destroys the submenus
-        if (g_pdhQuery) PdhCloseQuery(g_pdhQuery);
+        if (g_pdhQuery) {
+            PdhCloseQuery(g_pdhQuery);
+            g_pdhQuery = NULL;
+        }
+        free(g_pieAngles);
+        free(g_pieFeather);
+        g_pieAngles = NULL;
+        g_pieFeather = NULL;
+        if (g_hSingleInstanceEvent) {
+            CloseHandle(g_hSingleInstanceEvent);
+            g_hSingleInstanceEvent = NULL;
+        }
         PostQuitMessage(0);
         break;
 
@@ -1161,8 +1319,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // Application entry point
 int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow) {
-    HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, _T("ResourceMonitorEvent"));
+    SetLastError(ERROR_SUCCESS);
+    g_hSingleInstanceEvent = CreateEvent(NULL, TRUE, FALSE, _T("ResourceMonitorEvent"));
+    if (!g_hSingleInstanceEvent) {
+        MessageBox(NULL, _T("Cannot create the application event."), _T("Error"), MB_OK | MB_ICONERROR);
+        return 1;
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(g_hSingleInstanceEvent);
+        g_hSingleInstanceEvent = NULL;
         MessageBox(NULL, _T("The program is already running. Exiting."), _T("Warning"), MB_OK | MB_ICONWARNING);
         return 0;
     }
@@ -1176,10 +1341,22 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     // Initialize window class
     WNDCLASSEX wcex = { sizeof(WNDCLASSEX), CS_HREDRAW | CS_VREDRAW, WndProc, 0, 0, hInstance, NULL, NULL,
                         (HBRUSH)(COLOR_WINDOW+1), NULL, _T("TrayAppClass"), NULL };
-    RegisterClassEx(&wcex);
+    if (!RegisterClassEx(&wcex)) {
+        MessageBox(NULL, _T("Cannot register the application window class."), _T("Error"), MB_OK | MB_ICONERROR);
+        CloseHandle(g_hSingleInstanceEvent);
+        g_hSingleInstanceEvent = NULL;
+        return 1;
+    }
     g_hWnd = CreateWindow(_T("TrayAppClass"), _T("TrayApp"), WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    if (!g_hWnd) {
+        MessageBox(NULL, _T("Cannot create the application window."), _T("Error"), MB_OK | MB_ICONERROR);
+        CloseHandle(g_hSingleInstanceEvent);
+        g_hSingleInstanceEvent = NULL;
+        return 1;
+    }
     ShowWindow(g_hWnd, SW_HIDE);
     UpdateWindow(g_hWnd);
+    g_taskbarCreatedMessage = RegisterWindowMessage(_T("TaskbarCreated"));
 
     // Get CPU core count
     SYSTEM_INFO sysInfo;
@@ -1234,9 +1411,8 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     g_nidMemory.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nidMemory.uCallbackMessage = WM_TRAYICON;
     StringCchCopy(g_nidMemory.szTip, sizeof(g_nidMemory.szTip)/sizeof(TCHAR), g_lang->tooltip_memory_usage);
-    g_hIconMemory = LoadIcon(NULL, IDI_APPLICATION);
+    g_hIconMemory = CopyIcon(LoadIcon(NULL, IDI_APPLICATION));
     g_nidMemory.hIcon = g_hIconMemory;
-    Shell_NotifyIcon(NIM_ADD, &g_nidMemory);
 
     g_nidCpu.cbSize = sizeof(NOTIFYICONDATA);
     g_nidCpu.hWnd = g_hWnd;
@@ -1244,23 +1420,32 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     g_nidCpu.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nidCpu.uCallbackMessage = WM_TRAYICON;
     StringCchCopy(g_nidCpu.szTip, sizeof(g_nidCpu.szTip)/sizeof(TCHAR), g_lang->tooltip_cpu_avg);
-    g_hIconCpu = LoadIcon(NULL, IDI_APPLICATION);
+    g_hIconCpu = CopyIcon(LoadIcon(NULL, IDI_APPLICATION));
     g_nidCpu.hIcon = g_hIconCpu;
-    Shell_NotifyIcon(NIM_ADD, &g_nidCpu);
 
-    // Initialize PDH counters: a single query holds every memory and CPU
-    // counter. The one priming collect makes the rate counters valid from the
-    // first timer tick on, so no Sleep() loops are needed at startup.
+    // Initialize PDH counters. Every counter addition is checked; individual
+    // counters may be unavailable even when the query itself is valid.
     if (PdhOpenQuery(NULL, 0, &g_pdhQuery) == ERROR_SUCCESS) {
-        for (int i = 0; i < CACHE_COUNTERS; i++)
-            PdhAddEnglishCounter(g_pdhQuery, kCachePaths[i], 0, &g_pdhCounterCache[i]);
-        PdhAddEnglishCounter(g_pdhQuery, _T("\\Memory\\Committed Bytes"), 0, &g_pdhCounterCommittedBytes);
+        for (int i = 0; i < CACHE_COUNTERS; i++) {
+            if (PdhAddEnglishCounter(g_pdhQuery, kCachePaths[i], 0,
+                                     &g_pdhCounterCache[i]) != ERROR_SUCCESS) {
+                g_pdhCounterCache[i] = NULL;
+            }
+        }
+        if (PdhAddEnglishCounter(g_pdhQuery, _T("\\Memory\\Committed Bytes"), 0,
+                                 &g_pdhCounterCommittedBytes) != ERROR_SUCCESS)
+            g_pdhCounterCommittedBytes = NULL;
+        if (PdhAddEnglishCounter(g_pdhQuery, _T("\\Paging File(_Total)\\% Usage"), 0,
+                                 &g_pdhCounterPagingUsage) != ERROR_SUCCESS)
+            g_pdhCounterPagingUsage = NULL;
+
         for (int i = 0; i < g_coreCount; i++) {
             TCHAR path[128];
-            StringCchPrintf(path, 128, _T("\\Processor(%d)\\%% Processor Time"), i);
-            PdhAddEnglishCounter(g_pdhQuery, path, 0, &g_pdhCountersCpu[i]);
+            StringCchPrintf(path, ARRAYSIZE(path), _T("\\Processor(%d)\\%% Processor Time"), i);
+            if (PdhAddEnglishCounter(g_pdhQuery, path, 0, &g_pdhCountersCpu[i]) != ERROR_SUCCESS)
+                g_pdhCountersCpu[i] = NULL;
         }
-        PdhCollectQueryData(g_pdhQuery);
+        PdhCollectQueryData(g_pdhQuery);  // prime rate counters
     } else {
         g_pdhQuery = NULL;
     }
@@ -1302,9 +1487,12 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
 
     // Main message loop
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    int messageResult;
+    while ((messageResult = GetMessage(&msg, NULL, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    if (messageResult == -1)
+        return 1;
     return (int)msg.wParam;
 }
