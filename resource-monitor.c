@@ -204,12 +204,12 @@ static LANG lang_it = {
     _T("Intervallo aggiornamento..."),
     _T("Intervallo aggiornamento"),
     _T("Intervallo aggiornamento:"),
-    _T("Visualizzazione CPU"),
+    _T("Visualizza uso CPU"),
     _T("Visualizza tutti i core"),
-    _T("Visualizza media"),
-    _T("Visualizza massimo"),
-    _T("Media CPU: %.1f%%"),
-    _T("Max CPU: %.1f%% (Core %d)"),
+    _T("Visualizza uso medio"),
+    _T("Visualizza uso massimo"),
+    _T("Uso medio CPU: %.1f%%"),
+    _T("Uso max CPU: %.1f%% (core %d)"),
 };
 
 static LANG lang_es = {
