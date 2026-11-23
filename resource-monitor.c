@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <pdh.h>
+#include <dxgi.h>
+#include <pdhmsg.h>
 
 /* Compatibility with older MinGW PDH headers. */
 #ifndef PDH_CSTATUS_VALID_DATA
@@ -20,7 +22,7 @@
 #include <stdlib.h>
 #include <commctrl.h>
 
-// MinGW link libraries: -lpdh -lgdi32 -lcomctl32 -lshell32 -ladvapi32
+// MinGW link libraries: -lpdh -lgdi32 -lcomctl32 -lshell32 -ladvapi32 -ldxgi
 
 // System tray and menu constants
 #define WM_TRAYICON (WM_USER + 1)
@@ -50,15 +52,19 @@
 #define ID_MENU_EXIT 400
 #define ID_MENU_SHOW_MEMORY_ICON 500
 #define ID_MENU_SHOW_CPU_ICON 501
+#define ID_MENU_SHOW_GPU_ICON 502
 #define ID_MENU_CPU_DISPLAY 600
 #define ID_MENU_CPU_SHOW_ALL 601
 #define ID_MENU_CPU_SHOW_AVG 602
 #define ID_MENU_CPU_SHOW_MAX 603
+#define ID_MENU_GPU_BASE 2000
 
 #define CPU_DISPLAY_MODE_ALL 0
 #define CPU_DISPLAY_MODE_AVG 1
 #define CPU_DISPLAY_MODE_MAX 2
 #define MAX_CORES 256
+#define MAX_GPUS    8
+#define MAX_GPU_NAME 128
 #define ICON_SIZE 32
 #define CACHE_COUNTERS 4
 #define MIN_REFRESH_INTERVAL 500
@@ -81,9 +87,21 @@ typedef struct {
 typedef struct {
     int core_count;
     double percents[MAX_CORES];
-    double avg, max;                // stats of percents[], computed once in UpdateCpuInfo
+    double avg, max;
     int max_core;
 } CPUINFO;
+
+// Structure to hold GPU usage information
+typedef struct {
+    int gpuCount;
+    TCHAR name[MAX_GPUS][MAX_GPU_NAME];
+    DWORDLONG totalMemoryMB[MAX_GPUS];
+    DWORDLONG usedMemoryMB[MAX_GPUS];
+    double usagePercent[MAX_GPUS];
+    BOOL available[MAX_GPUS];
+    BOOL useShared[MAX_GPUS];
+    LUID adapterLuid[MAX_GPUS];
+} GPUINFO;
 
 // Structure for localized menu and tooltip strings
 typedef struct {
@@ -100,6 +118,9 @@ typedef struct {
     TCHAR tooltip_cpu_avg[64];
     TCHAR menu_show_memory_icon[64];
     TCHAR menu_show_cpu_icon[64];
+    TCHAR menu_show_gpu_icon[64];
+    TCHAR tooltip_gpu_usage[64];
+    TCHAR tooltip_gpu_mem_usage[64];
     TCHAR menu_refresh_interval[64];
     TCHAR dialog_refresh_title[64];
     TCHAR dialog_refresh_label[64];
@@ -126,6 +147,9 @@ static LANG lang_en = {
     _T("CPU Avg: %.1f%%"),
     _T("Show Memory Icon"),
     _T("Show CPU Icon"),
+    _T("Show GPU Icon"),
+    _T("GPU Usage: %.1f%%"),
+    _T("GPU Memory: %.1f%%"),
     _T("Refresh Interval..."),
     _T("Refresh Interval"),
     _T("Refresh interval:"),
@@ -151,6 +175,9 @@ static LANG lang_hu = {
     _T("CPU Átlag: %.1f%%"),
     _T("Memória ikon megjelenítése"),
     _T("CPU ikon megjelenítése"),
+    _T("GPU ikon megjelenítése"),
+    _T("GPU használat: %.1f%%"),
+    _T("GPU memória: %.1f%%"),
     _T("Frissítési idő..."),
     _T("Frissítési idő"),
     _T("Frissítési intervallum:"),
@@ -176,6 +203,9 @@ static LANG lang_de = {
     _T("CPU Durchschnitt: %.1f%%"),
     _T("Speicher-Symbol anzeigen"),
     _T("CPU-Symbol anzeigen"),
+    _T("GPU-Symbol anzeigen"),
+    _T("GPU-Auslastung: %.1f%%"),
+    _T("GPU-Speicher: %.1f%%"),
     _T("Aktualisierungsintervall..."),
     _T("Aktualisierungsintervall"),
     _T("Aktualisierungsintervall:"),
@@ -201,6 +231,9 @@ static LANG lang_it = {
     _T("Uso medio CPU: %.1f%%"),
     _T("Visualizza icona memoria"),
     _T("Visualizza icona CPU"),
+    _T("Visualizza icona GPU"),
+    _T("Utilizzo GPU: %.1f%%"),
+    _T("Memoria GPU: %.1f%%"),
     _T("Intervallo aggiornamento..."),
     _T("Intervallo aggiornamento"),
     _T("Intervallo aggiornamento:"),
@@ -226,6 +259,9 @@ static LANG lang_es = {
     _T("Promedio CPU: %.1f%%"),
     _T("Mostrar icono de memoria"),
     _T("Mostrar icono de CPU"),
+    _T("Mostrar icono de GPU"),
+    _T("Uso de GPU: %.1f%%"),
+    _T("Memoria GPU: %.1f%%"),
     _T("Intervalo de actualización..."),
     _T("Intervalo de actualización"),
     _T("Intervalo de actualización:"),
@@ -251,6 +287,9 @@ static LANG lang_fr = {
     _T("Moyenne CPU: %.1f%%"),
     _T("Afficher l'icône de mémoire"),
     _T("Afficher l'icône de CPU"),
+    _T("Afficher l'icône de GPU"),
+    _T("Utilisation GPU: %.1f%%"),
+    _T("Mémoire GPU: %.1f%%"),
     _T("Intervalle de rafraîchissement..."),
     _T("Intervalle de rafraîchissement"),
     _T("Intervalle de rafraîchissement:"),
@@ -276,6 +315,9 @@ static LANG lang_ru = {
     _T("Средняя загрузка CPU: %.1f%%"),
     _T("Показать значок памяти"),
     _T("Показать значок CPU"),
+    _T("Показать значок GPU"),
+    _T("Использование GPU: %.1f%%"),
+    _T("Память GPU: %.1f%%"),
     _T("Интервал обновления..."),
     _T("Интервал обновления"),
     _T("Интервал обновления:"),
@@ -309,6 +351,12 @@ void SetAutoStart(BOOL enable);
 void UpdateIconVisibility(void);
 void SaveMenuStateToRegistry(void);
 void LoadMenuStateFromRegistry(void);
+void UpdateGpuInfo(void);
+BOOL ReadGpuTelemetry(GPUINFO *gi);
+void InitGpuCounters(void);
+void GenerateGpuBarIcon(void);
+void GenerateGpuMemIcon(void);
+void UpdateTrayMenuGpu(void);
 void SaveRefreshIntervalToRegistry(void);
 void LoadRefreshIntervalFromRegistry(void);
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -330,16 +378,20 @@ static HMENU g_hLangMenu;
 static HMENU g_hCpuDisplayMenu;
 static NOTIFYICONDATA g_nidMemory = {0};
 static NOTIFYICONDATA g_nidCpu = {0};
+static NOTIFYICONDATA g_nidGpu = {0};
+static NOTIFYICONDATA g_nidGpuMem = {0};
 static HBITMAP g_hBmpUsed;
 static HBITMAP g_hBmpFree;
 static HICON g_hIconMemory;
 static HICON g_hIconCpu;
+static HICON g_hIconGpu;
+static HICON g_hIconGpuMem;
 static BOOL g_autoStartChecked;
 static DWORD g_refreshInterval = 1000;
 static DWORDLONG g_lastUsedBytes;
-static int g_lastBars[ICON_SIZE];   // packed height+color of the bars in the last CPU icon
-static BOOL g_menuOpen;             // menu texts are only refreshed while the menu is visible
-static PDH_HQUERY g_pdhQuery;       // one query holds every counter: one collect per tick
+static int g_lastBars[ICON_SIZE];
+static BOOL g_menuOpen;
+static PDH_HQUERY g_pdhQuery;
 static BOOL g_pdhOk;
 static PDH_HCOUNTER g_pdhCounterCache[CACHE_COUNTERS];
 static PDH_HCOUNTER g_pdhCounterCommittedBytes;
@@ -348,12 +400,31 @@ static PDH_HCOUNTER g_pdhCountersCpu[MAX_CORES];
 static int g_coreCount;
 static BOOL g_showMemoryIcon = TRUE;
 static BOOL g_showCpuIcon = TRUE;
+static BOOL g_showGpuIcon = TRUE;
+static BOOL g_gpuIconAdded = FALSE;
+static BOOL g_gpuMemIconAdded = FALSE;
+static GPUINFO g_gpu = {0};
 static int g_cpuDisplayMode = CPU_DISPLAY_MODE_ALL;
 static int screenWidth = 0, screenHeight = 0;
 static BOOL g_memoryIconAdded = FALSE;
 static BOOL g_cpuIconAdded = FALSE;
+static int g_lastGpuBars[ICON_SIZE];
+static int g_lastGpuBarCount = -1;
+static double g_lastGpuMemPercent = -1.0;
 static HANDLE g_hSingleInstanceEvent = NULL;
 static UINT g_taskbarCreatedMessage = 0;
+
+// Wildcard GPU counters: PDH re-expands the instance list on every
+// PdhCollectQueryData, so new/ended processes are handled automatically.
+static PDH_HCOUNTER g_gpuEngineWild = NULL;
+static PDH_HCOUNTER g_gpuDedWild = NULL;
+static PDH_HCOUNTER g_gpuShaWild = NULL;
+
+static const LPCTSTR kEngTypes[] = {
+    _T("engtype_3D"), _T("engtype_Compute"),
+    _T("engtype_VideoDecode"), _T("engtype_VideoEncode")
+};
+#define ENG_TYPES ((int)(sizeof(kEngTypes) / sizeof(kEngTypes[0])))
 
 static const LPCTSTR kCachePaths[CACHE_COUNTERS] = {
     _T("\\Memory\\Modified Page List Bytes"),
@@ -364,16 +435,18 @@ static const LPCTSTR kCachePaths[CACHE_COUNTERS] = {
 
 static const BYTE kZeroMask[(ICON_SIZE / 8) * ICON_SIZE]; // all-zero icon mask
 
+static const IID kIID_IDXGIFactory1 =
+    { 0x770aae78, 0xf26f, 0x4dba,
+      { 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87 } };
+
 // Rebuilds the CPU section of the context menu based on display mode
 void RebuildCpuMenuItems(CPUINFO *ci) {
     if (!g_hMenu || !g_hCpuDisplayMenu)
         return;
-    // Remove the existing CPU items (one loop over the real core count)
     for (int i = 0; i < g_coreCount; i++) {
         RemoveMenu(g_hMenu, ID_MENU_CPU_BASE + i, MF_BYCOMMAND);
     }
 
-    // Reference the CPU Display submenu handle for correct insertion position
     UINT_PTR insertRef = (UINT_PTR)g_hCpuDisplayMenu;
 
     TCHAR buf[64];
@@ -383,7 +456,6 @@ void RebuildCpuMenuItems(CPUINFO *ci) {
             InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE + i, buf);
         }
     } else if (g_cpuDisplayMode == CPU_DISPLAY_MODE_AVG) {
-        // stats are precomputed by UpdateCpuInfo (one pass per tick)
         StringCchPrintf(buf, 64, g_lang->cpu_avg_format, ci ? ci->avg : 0.0);
         InsertMenu(g_hMenu, insertRef, MF_BYCOMMAND | MF_STRING, ID_MENU_CPU_BASE, buf);
     } else {
@@ -399,7 +471,6 @@ static BOOL IsPdhValueValid(const PDH_FMT_COUNTERVALUE *cv) {
 }
 
 // Updates memory usage information using system and PDH counters.
-// The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateMemoryInfo(MEMINFO *mi) {
     MEMORYSTATUSEX ms;
     ZeroMemory(&ms, sizeof(ms));
@@ -418,11 +489,6 @@ void UpdateMemoryInfo(MEMINFO *mi) {
 
     if (g_pdhOk) {
         PDH_FMT_COUNTERVALUE cv;
-        /* Task Manager's Cached memory is approximately the sum of the
-         * modified page list and all standby cache priority lists. Update
-         * the value only when every counter produced a valid sample, so a
-         * missing counter cannot silently produce a misleading partial sum.
-         */
         {
             DWORDLONG cachedTotal = 0;
             int validCacheCounters = 0;
@@ -463,7 +529,7 @@ static HICON CreateArgbIcon(const DWORD *pix) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = ICON_SIZE;
-    bmi.bmiHeader.biHeight = -ICON_SIZE;      // top-down
+    bmi.bmiHeader.biHeight = -ICON_SIZE;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -487,12 +553,6 @@ static HICON CreateArgbIcon(const DWORD *pix) {
     return hIcon;
 }
 
-// The pie icon's subpixel geometry never changes, so the expensive atan2
-// angles are precomputed once into a lookup table (built lazily on first
-// use): 0 = subpixel outside the circle, otherwise angle in 1/65536 turns + 1.
-// A companion table holds each subpixel's edge-fade (feather) weight, so the
-// render loop needs no sqrt either.  Both tables are heap-allocated: as
-// statics they would add ~320 KB to the PE image on this toolchain.
 enum { PIE_SS = 8, PIE_SCALE = 65536, PIE_SUBPX = PIE_SS * PIE_SS };
 static DWORD *g_pieAngles;
 static BYTE  *g_pieFeather;
@@ -502,7 +562,7 @@ static BOOL InitPieAngles(void) {
     const size_t n = (size_t)ICON_SIZE * ICON_SIZE * PIE_SUBPX;
     const double c = ICON_SIZE / 2.0, R = c - 0.5, R2 = R * R;
     const double twoPi = 6.28318530717958647692;
-    DWORD *p = g_pieAngles = calloc(n, sizeof(DWORD));   // zeroed: 0 = outside circle
+    DWORD *p = g_pieAngles = calloc(n, sizeof(DWORD));
     BYTE *q = g_pieFeather = calloc(n, sizeof(BYTE));
     if (!p || !q) {
         free(g_pieAngles);   g_pieAngles = NULL;
@@ -517,11 +577,9 @@ static BOOL InitPieAngles(void) {
                     double dy = y + (sy + 0.5) / PIE_SS - c;
                     double d2 = dx * dx + dy * dy;
                     if (d2 > R2) continue;
-                    double a = atan2(dx, -dy);       // 0 at 12 o'clock, clockwise
+                    double a = atan2(dx, -dy);
                     if (a < 0.0) a += twoPi;
                     *p = (DWORD)(a * (PIE_SCALE / twoPi)) + 1;
-
-                    // edge fade over the outermost 1.5 px, sampled per subpixel
                     double af = (R + 0.5 - sqrt(d2)) / 1.5;
                     if (af > 1.0) af = 1.0;
                     *q = (BYTE)(af * 255.0 + 0.5);
@@ -533,14 +591,11 @@ static BOOL InitPieAngles(void) {
     return TRUE;
 }
 
-// Generates a pie chart icon representing memory usage: pure pixel math with
-// 8x8 supersampling and a subpixel-accurate feathered edge, instead of the
-// old GDI pipeline (3 DCs, 2 Polygon calls, HALFTONE StretchBlt, mask Ellipse).
 HICON GeneratePieIcon(MEMINFO *mi)
 {
     DWORD pix[ICON_SIZE * ICON_SIZE];
     if (!g_pieAnglesReady && !InitPieAngles()) return NULL;
-    const DWORD thr = (DWORD)(mi->usedPercent * (PIE_SCALE / 100.0));   // used iff angle < thr
+    const DWORD thr = (DWORD)(mi->usedPercent * (PIE_SCALE / 100.0));
     const DWORD *a = g_pieAngles;
     const BYTE *f = g_pieFeather;
 
@@ -548,15 +603,15 @@ HICON GeneratePieIcon(MEMINFO *mi)
         int nUsed = 0, nFree = 0, fade = 0;
         for (int s = 0; s < PIE_SUBPX; s++) {
             DWORD v = a[s];
-            if (v == 0) continue;               // subpixel outside the circle
-            fade += f[s];                       // feather weight of this subpixel
+            if (v == 0) continue;
+            fade += f[s];
             if (v - 1 < thr) nUsed++; else nFree++;
         }
         int n = nUsed + nFree;
-        if (n == 0) { pix[i] = 0; continue; }    // transparent background
+        if (n == 0) { pix[i] = 0; continue; }
 
         DWORD gray = (DWORD)((nUsed * 200 + nFree * 100) / n);
-        DWORD alpha = (DWORD)((fade + PIE_SUBPX / 2) / PIE_SUBPX);   // average 0..255 weight
+        DWORD alpha = (DWORD)((fade + PIE_SUBPX / 2) / PIE_SUBPX);
         pix[i] = (alpha << 24) | (gray << 16) | (gray << 8) | gray;
     }
     return CreateArgbIcon(pix);
@@ -574,7 +629,6 @@ void InitializeMenuWithIcons(void) {
     SetMenuItemInfo(g_hMenu, ID_MENU_FREE, FALSE, &mii);
 }
 
-// Cleans up menu icons
 void CleanupMenuIcons(void) {
     if (g_hBmpUsed) DeleteObject(g_hBmpUsed);
     if (g_hBmpFree) DeleteObject(g_hBmpFree);
@@ -582,7 +636,6 @@ void CleanupMenuIcons(void) {
     g_hBmpFree = NULL;
 }
 
-// Creates a solid color bitmap for menu icons (DIB fill, no DC needed)
 HBITMAP CreateColorBitmap(COLORREF color, int width, int height) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -605,7 +658,6 @@ HBITMAP CreateColorBitmap(COLORREF color, int width, int height) {
     return hBitmap;
 }
 
-// MIIM_STRING keeps the item's bitmap, unlike ModifyMenu
 void SetMenuText(HMENU m, UINT id, LPCTSTR text) {
     MENUITEMINFO mii = {0};
     mii.cbSize = sizeof(mii);
@@ -614,8 +666,6 @@ void SetMenuText(HMENU m, UINT id, LPCTSTR text) {
     SetMenuItemInfo(m, id, FALSE, &mii);
 }
 
-// Updates the system tray memory icon; Shell_NotifyIcon is only called when
-// the tooltip or the icon actually changed
 void UpdateTrayMemory(MEMINFO *mi) {
     TCHAR tip[128];
     StringCchPrintf(tip, ARRAYSIZE(tip), g_lang->tooltip_memory_usage, mi->usedPercent);
@@ -653,8 +703,6 @@ static void FormatMegabytes(TCHAR *buffer, size_t bufferCount, DWORDLONG bytes) 
     StringCchCopy(buffer, bufferCount, &digits[pos]);
 }
 
-// Updates the four memory items of the context menu; MIIM_STRING keeps the
-// Used/Free bitmaps, so no per-tick bitmap re-application is needed
 void UpdateMenuMemory(MEMINFO *mi) {
     TCHAR buf[64];
     TCHAR value[32];
@@ -672,8 +720,6 @@ void UpdateMenuMemory(MEMINFO *mi) {
     SetMenuText(g_hMenu, ID_MENU_SWAP, buf);
 }
 
-// Updates CPU usage information and computes avg/max in the same pass.
-// The query data itself is collected once per tick in the WM_TIMER handler.
 void UpdateCpuInfo(CPUINFO *ci) {
     ci->core_count = g_coreCount;
     for (int i = 0; i < g_coreCount; i++) {
@@ -699,16 +745,13 @@ void UpdateCpuInfo(CPUINFO *ci) {
     ci->max_core = mc;
 }
 
-// Generates a bar chart icon for CPU usage (direct pixel writes, no DCs).
-// Returns NULL when the visible bars are identical to the previously rendered
-// icon, so the DIB + icon + tray update is skipped entirely.
 HICON GenerateBarIcon(CPUINFO *ci) {
     int numCores = ci->core_count > 0 ? ci->core_count : 1;
     int numGroups = numCores < ICON_SIZE ? numCores : ICON_SIZE;
-    int bars[ICON_SIZE];                       // packed bar height + color flag
+    int bars[ICON_SIZE];
 
     for (int g = 0; g < numGroups; g++) {
-        int c0 = g * numCores / numGroups, c1 = (g + 1) * numCores / numGroups;  // c1 > c0
+        int c0 = g * numCores / numGroups, c1 = (g + 1) * numCores / numGroups;
         double sum = 0.0;
         for (int i = c0; i < c1; i++) sum += ci->percents[i];
         double avg = sum / (c1 - c0);
@@ -720,13 +763,13 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     }
 
     if (memcmp(bars, g_lastBars, numGroups * sizeof(int)) == 0)
-        return NULL;                           // nothing visible changed
+        return NULL;
 
     DWORD pix[ICON_SIZE * ICON_SIZE];
-    memset(pix, 0, sizeof(pix));               // transparent background
+    memset(pix, 0, sizeof(pix));
     for (int g = 0; g < numGroups; g++) {
         int h = bars[g] & 0xFF;
-        DWORD color = (bars[g] & 256) ? 0xFFC86464u : 0xFF64C864u;   // RGB(200,100,100) / RGB(100,200,100)
+        DWORD color = (bars[g] & 256) ? 0xFFC86464u : 0xFF64C864u;
         int x0 = g * ICON_SIZE / numGroups, x1 = (g + 1) * ICON_SIZE / numGroups;
         for (int y = ICON_SIZE - h; y < ICON_SIZE; y++)
             for (int x = x0; x < x1; x++)
@@ -734,33 +777,29 @@ HICON GenerateBarIcon(CPUINFO *ci) {
     }
 
     HICON hIcon = CreateArgbIcon(pix);
-    if (hIcon) memcpy(g_lastBars, bars, numGroups * sizeof(int));  // on failure retry next tick
+    if (hIcon) memcpy(g_lastBars, bars, numGroups * sizeof(int));
     return hIcon;
 }
 
-// Updates the system tray CPU icon; Shell_NotifyIcon is only called when
-// the tooltip or the icon actually changed
 void UpdateTrayCpu(CPUINFO *ci) {
     TCHAR tip[128];
     StringCchPrintf(tip, 128, g_lang->tooltip_cpu_avg, ci->avg);
     BOOL tipChanged = _tcscmp(tip, g_nidCpu.szTip) != 0;
     if (tipChanged) StringCchCopy(g_nidCpu.szTip, ARRAYSIZE(g_nidCpu.szTip), tip);
 
-    HICON hNewIcon = GenerateBarIcon(ci);      // NULL when the bars did not change
+    HICON hNewIcon = GenerateBarIcon(ci);
     if (hNewIcon) {
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
         g_hIconCpu = hNewIcon;
         g_nidCpu.hIcon = hNewIcon;
         if (g_cpuIconAdded)
-            Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);   // sends the new icon and tip
+            Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
         return;
     }
     if (tipChanged && g_cpuIconAdded)
         Shell_NotifyIcon(NIM_MODIFY, &g_nidCpu);
 }
 
-// Updates the CPU items of the context menu for the current display mode
-// (stats come precomputed from UpdateCpuInfo)
 void UpdateMenuCpu(CPUINFO *ci) {
     TCHAR buf[64];
     if (g_cpuDisplayMode == CPU_DISPLAY_MODE_ALL) {
@@ -777,13 +816,275 @@ void UpdateMenuCpu(CPUINFO *ci) {
     }
 }
 
-// Sets the application language and refreshes the UI
+// ===================================================================
+//  GPU support
+// ===================================================================
+void UpdateGpuInfo(void) {
+    ZeroMemory(&g_gpu, sizeof(g_gpu));
+
+    IDXGIFactory1 *factory = NULL;
+    if (FAILED(CreateDXGIFactory1(&kIID_IDXGIFactory1, (void**)&factory)))
+        return;
+
+    IDXGIAdapter1 *adapter = NULL;
+    for (UINT i = 0;
+         factory->lpVtbl->EnumAdapters1(factory, i, &adapter) != DXGI_ERROR_NOT_FOUND
+             && g_gpu.gpuCount < MAX_GPUS;
+         i++) {
+        DXGI_ADAPTER_DESC1 desc;
+        if (SUCCEEDED(adapter->lpVtbl->GetDesc1(adapter, &desc)) &&
+            !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+
+            StringCchCopy(g_gpu.name[g_gpu.gpuCount], MAX_GPU_NAME, desc.Description);
+
+            DWORDLONG dedicated = desc.DedicatedVideoMemory;
+            BOOL useShared = dedicated < (256ULL * 1024 * 1024);
+            DWORDLONG totalBytes = useShared ? desc.SharedSystemMemory : dedicated;
+            g_gpu.useShared[g_gpu.gpuCount] = useShared;
+            g_gpu.totalMemoryMB[g_gpu.gpuCount] = totalBytes / (1024ULL * 1024ULL);
+            g_gpu.available[g_gpu.gpuCount] = TRUE;
+            g_gpu.adapterLuid[g_gpu.gpuCount] = desc.AdapterLuid;
+            g_gpu.gpuCount++;
+        }
+        adapter->lpVtbl->Release(adapter);
+    }
+    factory->lpVtbl->Release(factory);
+}
+
+// Extracts the LUID from "...luid_0xHIGH_0xLOW_..." instance names
+static BOOL ParseLuidFromInstance(LPCTSTR instance, LUID *outLuid) {
+    LPCTSTR p = _tcsstr(instance, _T("luid_0x"));
+    if (!p) return FALSE;
+    p += 7;
+    unsigned long high = _tcstoul(p, NULL, 16);
+
+    p = _tcsstr(p, _T("_0x"));
+    if (!p) return FALSE;
+    p += 3;
+    unsigned long low = _tcstoul(p, NULL, 16);
+
+    outLuid->HighPart = (LONG)high;
+    outLuid->LowPart = (DWORD)low;
+    return TRUE;
+}
+
+static int FindGpuIndexByLuid(LUID luid) {
+    for (int i = 0; i < g_gpu.gpuCount; i++) {
+        if (g_gpu.available[i] &&
+            g_gpu.adapterLuid[i].HighPart == luid.HighPart &&
+            g_gpu.adapterLuid[i].LowPart == luid.LowPart)
+            return i;
+    }
+    return -1;
+}
+
+// Reads all current instances of a wildcard counter. Caller must free().
+static PDH_FMT_COUNTERVALUE_ITEM *GetCounterArray(PDH_HCOUNTER h, DWORD fmt, DWORD *count) {
+    if (!h) return NULL;
+    DWORD size = 0, cnt = 0;
+    PDH_STATUS st = PdhGetFormattedCounterArray(h, fmt, &size, &cnt, NULL);
+    if (st != PDH_MORE_DATA || size == 0) return NULL;
+    PDH_FMT_COUNTERVALUE_ITEM *buf = (PDH_FMT_COUNTERVALUE_ITEM *)malloc(size);
+    if (!buf) return NULL;
+    st = PdhGetFormattedCounterArray(h, fmt, &size, &cnt, buf);
+    if (st != ERROR_SUCCESS) { free(buf); return NULL; }
+    *count = cnt;
+    return buf;
+}
+
+void InitGpuCounters(void) {
+    if (g_gpuEngineWild) { PdhRemoveCounter(g_gpuEngineWild); g_gpuEngineWild = NULL; }
+    if (g_gpuDedWild)    { PdhRemoveCounter(g_gpuDedWild);    g_gpuDedWild = NULL; }
+    if (g_gpuShaWild)    { PdhRemoveCounter(g_gpuShaWild);    g_gpuShaWild = NULL; }
+
+    if (!g_pdhQuery || g_gpu.gpuCount == 0)
+        return;
+
+    if (PdhAddEnglishCounter(g_pdhQuery, _T("\\GPU Engine(*)\\Utilization Percentage"),
+                             0, &g_gpuEngineWild) != ERROR_SUCCESS)
+        g_gpuEngineWild = NULL;
+    if (PdhAddEnglishCounter(g_pdhQuery, _T("\\GPU Adapter Memory(*)\\Dedicated Usage"),
+                             0, &g_gpuDedWild) != ERROR_SUCCESS)
+        g_gpuDedWild = NULL;
+    if (PdhAddEnglishCounter(g_pdhQuery, _T("\\GPU Adapter Memory(*)\\Shared Usage"),
+                             0, &g_gpuShaWild) != ERROR_SUCCESS)
+        g_gpuShaWild = NULL;
+}
+
+BOOL ReadGpuTelemetry(GPUINFO *gi) {
+    if (!g_pdhQuery || gi->gpuCount == 0) return FALSE;
+
+    double eng[MAX_GPUS][ENG_TYPES];
+    DWORDLONG ded[MAX_GPUS], sha[MAX_GPUS];
+    memset(eng, 0, sizeof(eng));
+    memset(ded, 0, sizeof(ded));
+    memset(sha, 0, sizeof(sha));
+
+    DWORD n = 0;
+    PDH_FMT_COUNTERVALUE_ITEM *items;
+
+    if ((items = GetCounterArray(g_gpuEngineWild, PDH_FMT_DOUBLE, &n)) != NULL) {
+        for (DWORD i = 0; i < n; i++) {
+            if (!IsPdhValueValid(&items[i].FmtValue)) continue;
+            LUID luid;
+            if (!ParseLuidFromInstance(items[i].szName, &luid)) continue;
+            int g = FindGpuIndexByLuid(luid);
+            if (g < 0) continue;
+            double v = items[i].FmtValue.doubleValue;
+            if (v < 0.0) v = 0.0;
+            for (int t = 0; t < ENG_TYPES; t++) {
+                if (_tcsstr(items[i].szName, kEngTypes[t])) { eng[g][t] += v; break; }
+            }
+        }
+        free(items);
+    }
+
+    if ((items = GetCounterArray(g_gpuDedWild, PDH_FMT_LARGE, &n)) != NULL) {
+        for (DWORD i = 0; i < n; i++) {
+            LUID luid;
+            if (!IsPdhValueValid(&items[i].FmtValue) || items[i].FmtValue.largeValue < 0) continue;
+            if (!ParseLuidFromInstance(items[i].szName, &luid)) continue;
+            int g = FindGpuIndexByLuid(luid);
+            if (g >= 0) ded[g] += (DWORDLONG)items[i].FmtValue.largeValue;
+        }
+        free(items);
+    }
+
+    if ((items = GetCounterArray(g_gpuShaWild, PDH_FMT_LARGE, &n)) != NULL) {
+        for (DWORD i = 0; i < n; i++) {
+            LUID luid;
+            if (!IsPdhValueValid(&items[i].FmtValue) || items[i].FmtValue.largeValue < 0) continue;
+            if (!ParseLuidFromInstance(items[i].szName, &luid)) continue;
+            int g = FindGpuIndexByLuid(luid);
+            if (g >= 0) sha[g] += (DWORDLONG)items[i].FmtValue.largeValue;
+        }
+        free(items);
+    }
+
+    for (int i = 0; i < gi->gpuCount; i++) {
+        double m = 0.0;
+        for (int t = 0; t < ENG_TYPES; t++)
+            if (eng[i][t] > m) m = eng[i][t];
+        if (m > 100.0) m = 100.0;
+        gi->usagePercent[i] = m;
+        DWORDLONG usedBytes = gi->useShared[i] ? sha[i] : ded[i];
+        gi->usedMemoryMB[i] = usedBytes / (1024ULL * 1024ULL);
+    }
+    return TRUE;
+}
+
+void GenerateGpuBarIcon(void) {
+    int available = 0;
+    for (int i = 0; i < g_gpu.gpuCount; i++)
+        if (g_gpu.available[i]) available++;
+    if (available == 0)
+        return;
+
+    int numBars = available < ICON_SIZE ? available : ICON_SIZE;
+    int bars[ICON_SIZE];
+    int bi = 0;
+    for (int i = 0; i < g_gpu.gpuCount && bi < numBars; i++) {
+        if (!g_gpu.available[i]) continue;
+        int h = (int)(g_gpu.usagePercent[i] * ICON_SIZE / 100.0);
+        if (h < 1) h = 1;
+        if (h > ICON_SIZE) h = ICON_SIZE;
+        bars[bi++] = h | (g_gpu.usagePercent[i] > 50.0 ? 256 : 0);
+    }
+
+    if (bi == g_lastGpuBarCount && memcmp(bars, g_lastGpuBars, bi * sizeof(int)) == 0)
+        return;
+
+    DWORD pix[ICON_SIZE * ICON_SIZE];
+    memset(pix, 0, sizeof(pix));
+    for (int b = 0; b < bi; b++) {
+        int h = bars[b] & 0xFF;
+        DWORD color = (bars[b] & 256) ? 0xFFFF8C3Cu
+                                       : 0xFF50A0FFu;
+        int x0 = b * ICON_SIZE / bi, x1 = (b + 1) * ICON_SIZE / bi;
+        for (int y = ICON_SIZE - h; y < ICON_SIZE; y++)
+            for (int x = x0; x < x1; x++)
+                pix[y * ICON_SIZE + x] = color;
+    }
+
+    HICON hNew = CreateArgbIcon(pix);
+    if (hNew) {
+        if (g_hIconGpu) DestroyIcon(g_hIconGpu);
+        g_hIconGpu = hNew;
+        g_nidGpu.hIcon = hNew;
+        memcpy(g_lastGpuBars, bars, bi * sizeof(int));
+        g_lastGpuBarCount = bi;
+        if (g_gpuIconAdded) Shell_NotifyIcon(NIM_MODIFY, &g_nidGpu);
+    }
+}
+
+void GenerateGpuMemIcon(void) {
+    DWORDLONG total = 0, used = 0;
+    for (int i = 0; i < g_gpu.gpuCount; i++) {
+        if (!g_gpu.available[i]) continue;
+        total += g_gpu.totalMemoryMB[i];
+        used  += g_gpu.usedMemoryMB[i];
+    }
+
+    if (total == 0)
+        return;
+
+    double pct = (double)used / (double)total * 100.0;
+    if (pct < 0.0) pct = 0.0;
+    if (pct > 100.0) pct = 100.0;
+    if (g_hIconGpuMem && fabs(pct - g_lastGpuMemPercent) < 1.0)
+        return;
+
+    MEMINFO tmp = {0};
+    tmp.usedPercent = pct;
+    HICON hNew = GeneratePieIcon(&tmp);
+    if (hNew) {
+        if (g_hIconGpuMem) DestroyIcon(g_hIconGpuMem);
+        g_hIconGpuMem = hNew;
+        g_nidGpuMem.hIcon = hNew;
+        g_lastGpuMemPercent = pct;
+        if (g_gpuMemIconAdded) Shell_NotifyIcon(NIM_MODIFY, &g_nidGpuMem);
+    }
+}
+
+void UpdateTrayMenuGpu(void) {
+    if (!g_hMenu || !g_hCpuDisplayMenu)
+        return;
+
+    TCHAR buf[256];
+    UINT_PTR ref = (UINT_PTR)g_hCpuDisplayMenu;
+
+    for (int i = 0; i < g_gpu.gpuCount; i++) {
+        UINT id = ID_MENU_GPU_BASE + i;
+        if (!g_gpu.available[i]) {
+            RemoveMenu(g_hMenu, id, MF_BYCOMMAND);
+            continue;
+        }
+        StringCchPrintf(buf, 256,
+                        _T("GPU %d: %s (%.1f%%, %I64u/%I64u MB)"),
+                        i, g_gpu.name[i], g_gpu.usagePercent[i],
+                        (unsigned long long)g_gpu.usedMemoryMB[i],
+                        (unsigned long long)g_gpu.totalMemoryMB[i]);
+
+        MENUITEMINFO mii = {0};
+        mii.cbSize = sizeof(mii);
+        mii.fMask = MIIM_ID;
+        if (GetMenuItemInfo(g_hMenu, id, FALSE, &mii))
+            SetMenuText(g_hMenu, id, buf);
+        else
+            InsertMenu(g_hMenu, ref, MF_BYCOMMAND | MF_STRING, id, buf);
+    }
+
+    for (int i = g_gpu.gpuCount; i < MAX_GPUS; i++)
+        RemoveMenu(g_hMenu, ID_MENU_GPU_BASE + i, MF_BYCOMMAND);
+}
+
+// ===================================================================
+
 void SetLanguage(LANG *newLang) {
     g_lang = newLang;
     RefreshMenuText();
 }
 
-// Saves the selected language to the registry
 void SaveLanguageSelectionToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -798,7 +1099,6 @@ void SaveLanguageSelectionToRegistry(void) {
     }
 }
 
-// Loads the selected language from the registry
 BOOL LoadLanguageSelectionFromRegistry(void) {
     HKEY hKey;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -822,17 +1122,18 @@ BOOL LoadLanguageSelectionFromRegistry(void) {
     return FALSE;
 }
 
-// Refreshes menu text with current language
 void RefreshMenuText(void) {
     SetMenuText(g_hMenu, ID_MENU_ABOUT, g_lang->menu_about);
     SetMenuText(g_hMenu, ID_MENU_AUTOSTART, g_lang->menu_autostart);
     SetMenuText(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
     SetMenuText(g_hMenu, ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
+    SetMenuText(g_hMenu, ID_MENU_SHOW_GPU_ICON, g_lang->menu_show_gpu_icon);
     SetMenuText(g_hMenu, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
     SetMenuText(g_hMenu, ID_MENU_EXIT, g_lang->menu_exit);
     CheckMenuItem(g_hMenu, ID_MENU_AUTOSTART, MF_BYCOMMAND | (g_autoStartChecked ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, MF_BYCOMMAND | (g_showMemoryIcon ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hMenu, ID_MENU_SHOW_CPU_ICON, MF_BYCOMMAND | (g_showCpuIcon ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_hMenu, ID_MENU_SHOW_GPU_ICON, MF_BYCOMMAND | (g_showGpuIcon ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_EN, MF_BYCOMMAND | (g_lang == &lang_en ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_DE, MF_BYCOMMAND | (g_lang == &lang_de ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_hLangMenu, ID_MENU_LANG_IT, MF_BYCOMMAND | (g_lang == &lang_it ? MF_CHECKED : MF_UNCHECKED));
@@ -877,7 +1178,6 @@ static BOOL ReadRegistryDword(HKEY hKey, LPCTSTR valueName, DWORD *value) {
     return TRUE;
 }
 
-// Checks if autostart is enabled
 BOOL IsAutoStartEnabled(void) {
     HKEY hKey;
     TCHAR szValue[MAX_PATH];
@@ -896,7 +1196,6 @@ BOOL IsAutoStartEnabled(void) {
     return result;
 }
 
-// Enables or disables autostart
 void SetAutoStart(BOOL enable) {
     HKEY hKey;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), 0, KEY_WRITE, &hKey) != ERROR_SUCCESS) {
@@ -916,12 +1215,15 @@ void SetAutoStart(BOOL enable) {
     RegCloseKey(hKey);
 }
 
-// Updates visibility of system tray icons
 static void AddTrayIcons(void) {
     if (g_showMemoryIcon && !g_memoryIconAdded)
         g_memoryIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidMemory);
     if (g_showCpuIcon && !g_cpuIconAdded)
         g_cpuIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidCpu);
+    if (g_showGpuIcon && !g_gpuIconAdded)
+        g_gpuIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidGpu);
+    if (g_showGpuIcon && !g_gpuMemIconAdded)
+        g_gpuMemIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidGpuMem);
 }
 
 void UpdateIconVisibility(void) {
@@ -938,37 +1240,52 @@ void UpdateIconVisibility(void) {
         Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
         g_cpuIconAdded = FALSE;
     }
+
+    if (g_showGpuIcon && !g_gpuIconAdded)
+        g_gpuIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidGpu);
+    else if (!g_showGpuIcon && g_gpuIconAdded) {
+        Shell_NotifyIcon(NIM_DELETE, &g_nidGpu);
+        g_gpuIconAdded = FALSE;
+    }
+
+    if (g_showGpuIcon && !g_gpuMemIconAdded)
+        g_gpuMemIconAdded = Shell_NotifyIcon(NIM_ADD, &g_nidGpuMem);
+    else if (!g_showGpuIcon && g_gpuMemIconAdded) {
+        Shell_NotifyIcon(NIM_DELETE, &g_nidGpuMem);
+        g_gpuMemIconAdded = FALSE;
+    }
 }
 
-// Saves icon visibility settings to the registry
 void SaveMenuStateToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         DWORD showMemoryIcon = g_showMemoryIcon;
         DWORD showCpuIcon = g_showCpuIcon;
+        DWORD showGpuIcon = g_showGpuIcon;
         RegSetValueEx(hKey, _T("ShowMemoryIcon"), 0, REG_DWORD, (const BYTE *)&showMemoryIcon, sizeof(DWORD));
         RegSetValueEx(hKey, _T("ShowCpuIcon"), 0, REG_DWORD, (const BYTE *)&showCpuIcon, sizeof(DWORD));
+        RegSetValueEx(hKey, _T("ShowGpuIcon"), 0, REG_DWORD, (const BYTE *)&showGpuIcon, sizeof(DWORD));
         RegCloseKey(hKey);
     }
 }
 
-// Loads icon visibility settings from the registry
 void LoadMenuStateFromRegistry(void) {
     HKEY hKey;
     DWORD value;
-    g_showMemoryIcon = g_showCpuIcon = TRUE;
+    g_showMemoryIcon = g_showCpuIcon = g_showGpuIcon = TRUE;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         if (ReadRegistryDword(hKey, _T("ShowMemoryIcon"), &value))
             g_showMemoryIcon = value != 0;
         if (ReadRegistryDword(hKey, _T("ShowCpuIcon"), &value))
             g_showCpuIcon = value != 0;
+        if (ReadRegistryDword(hKey, _T("ShowGpuIcon"), &value))
+            g_showGpuIcon = value != 0;
         RegCloseKey(hKey);
     }
-    if (!g_showMemoryIcon && !g_showCpuIcon)
+    if (!g_showMemoryIcon && !g_showCpuIcon && !g_showGpuIcon)
         g_showMemoryIcon = TRUE;
 }
 
-// Saves the CPU display mode to the registry
 void SaveCpuDisplaySettingsToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -978,7 +1295,6 @@ void SaveCpuDisplaySettingsToRegistry(void) {
     }
 }
 
-// Loads the CPU display mode from the registry
 void LoadCpuDisplaySettingsFromRegistry(void) {
     HKEY hKey;
     DWORD cpuMode;
@@ -990,7 +1306,6 @@ void LoadCpuDisplaySettingsFromRegistry(void) {
     }
 }
 
-// Saves the refresh interval to the registry
 void SaveRefreshIntervalToRegistry(void) {
     HKEY hKey;
     if (RegCreateKeyEx(HKEY_CURRENT_USER, _T("Software\\ResourceMonitor"), 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -999,7 +1314,6 @@ void SaveRefreshIntervalToRegistry(void) {
     }
 }
 
-// Loads the refresh interval from the registry
 void LoadRefreshIntervalFromRegistry(void) {
     HKEY hKey;
     DWORD interval;
@@ -1012,12 +1326,10 @@ void LoadRefreshIntervalFromRegistry(void) {
     }
 }
 
-// Show about dialog
 void ShowAboutDialog(HWND hwndParent) {
     DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUT), hwndParent, AboutDlgProc);
 }
 
-// About dialog procedure
 INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     static HFONT hLinkFont = NULL;
     static HBRUSH hBrush = NULL;
@@ -1093,7 +1405,6 @@ INT_PTR CALLBACK AboutDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPa
     return FALSE;
 }
 
-// Refresh interval dialog procedure
 INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_INITDIALOG: {
@@ -1148,7 +1459,6 @@ INT_PTR CALLBACK RefreshIntervalDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
     return FALSE;
 }
 
-// Window procedure for handling system tray and menu events
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static MEMINFO mi;
     static CPUINFO ci;
@@ -1156,6 +1466,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreatedMessage && msg == g_taskbarCreatedMessage) {
         g_memoryIconAdded = FALSE;
         g_cpuIconAdded = FALSE;
+        g_gpuIconAdded = FALSE;
+        g_gpuMemIconAdded = FALSE;
+        UpdateGpuInfo();
+        InitGpuCounters();
+        ReadGpuTelemetry(&g_gpu);
+        GenerateGpuBarIcon();
+        GenerateGpuMemIcon();
+        UpdateTrayMenuGpu();
         AddTrayIcons();
         return 0;
     }
@@ -1164,6 +1482,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE:
         g_hWnd = hWnd;
         LoadRefreshIntervalFromRegistry();
+        UpdateGpuInfo();
         if (SetTimer(hWnd, 1, g_refreshInterval, NULL) == 0) {
             MessageBox(hWnd, _T("Unable to create the refresh timer."), _T("Error"), MB_OK | MB_ICONERROR);
             return -1;
@@ -1171,30 +1490,62 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_TIMER:
-        g_pdhOk = g_pdhQuery && PdhCollectQueryData(g_pdhQuery) == ERROR_SUCCESS;   // one sample for all counters
+        g_pdhOk = g_pdhQuery && PdhCollectQueryData(g_pdhQuery) == ERROR_SUCCESS;
         UpdateMemoryInfo(&mi);
         UpdateCpuInfo(&ci);
+        ReadGpuTelemetry(&g_gpu);
+
         UpdateTrayMemory(&mi);
         UpdateTrayCpu(&ci);
-        if (g_menuOpen) {              // the visible menu text stays live
+        GenerateGpuBarIcon();
+        GenerateGpuMemIcon();
+
+        {
+            double maxUsage = 0.0;
+            DWORDLONG totGpu = 0, useGpu = 0;
+            for (int i = 0; i < g_gpu.gpuCount; i++) {
+                if (!g_gpu.available[i]) continue;
+                if (g_gpu.usagePercent[i] > maxUsage) maxUsage = g_gpu.usagePercent[i];
+                totGpu += g_gpu.totalMemoryMB[i];
+                useGpu += g_gpu.usedMemoryMB[i];
+            }
+            TCHAR gtip[128];
+
+            StringCchPrintf(gtip, 128, g_lang->tooltip_gpu_usage, maxUsage);
+            if (_tcscmp(gtip, g_nidGpu.szTip) != 0) {
+                StringCchCopy(g_nidGpu.szTip, ARRAYSIZE(g_nidGpu.szTip), gtip);
+                if (g_gpuIconAdded) Shell_NotifyIcon(NIM_MODIFY, &g_nidGpu);
+            }
+
+            double gpuMemPct = totGpu ? (double)useGpu / (double)totGpu * 100.0 : 0.0;
+            StringCchPrintf(gtip, 128, g_lang->tooltip_gpu_mem_usage, gpuMemPct);
+            if (_tcscmp(gtip, g_nidGpuMem.szTip) != 0) {
+                StringCchCopy(g_nidGpuMem.szTip, ARRAYSIZE(g_nidGpuMem.szTip), gtip);
+                if (g_gpuMemIconAdded) Shell_NotifyIcon(NIM_MODIFY, &g_nidGpuMem);
+            }
+        }
+
+        if (g_menuOpen) {
             UpdateMenuMemory(&mi);
             UpdateMenuCpu(&ci);
+            UpdateTrayMenuGpu();
         }
         break;
 
     case WM_TRAYICON:
-        if ((wParam == 1 || wParam == 2) && lParam == WM_RBUTTONUP) {
+        if (wParam >= 1 && wParam <= 4 && lParam == WM_RBUTTONUP) {
             POINT pt;
             GetCursorPos(&pt);
             SetForegroundWindow(hWnd);
             UpdateMenuMemory(&mi);
             UpdateMenuCpu(&ci);
+            UpdateTrayMenuGpu();
             TrackPopupMenu(g_hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
             PostMessage(hWnd, WM_NULL, 0, 0);
         }
         break;
 
-    case WM_ENTERMENULOOP:            // menu texts are refreshed only while visible
+    case WM_ENTERMENULOOP:
         g_menuOpen = TRUE;
         break;
 
@@ -1247,16 +1598,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DestroyWindow(hWnd);
             break;
         case ID_MENU_SHOW_MEMORY_ICON:
-            if (g_showMemoryIcon && !g_showCpuIcon) break;
+            if (g_showMemoryIcon && !g_showCpuIcon && !g_showGpuIcon) break;
             g_showMemoryIcon = !g_showMemoryIcon;
             CheckMenuItem(g_hMenu, ID_MENU_SHOW_MEMORY_ICON, MF_BYCOMMAND | (g_showMemoryIcon ? MF_CHECKED : MF_UNCHECKED));
             UpdateIconVisibility();
             SaveMenuStateToRegistry();
             break;
         case ID_MENU_SHOW_CPU_ICON:
-            if (g_showCpuIcon && !g_showMemoryIcon) break;
+            if (g_showCpuIcon && !g_showMemoryIcon && !g_showGpuIcon) break;
             g_showCpuIcon = !g_showCpuIcon;
             CheckMenuItem(g_hMenu, ID_MENU_SHOW_CPU_ICON, MF_BYCOMMAND | (g_showCpuIcon ? MF_CHECKED : MF_UNCHECKED));
+            UpdateIconVisibility();
+            SaveMenuStateToRegistry();
+            break;
+        case ID_MENU_SHOW_GPU_ICON:
+            if (g_showGpuIcon && !g_showMemoryIcon && !g_showCpuIcon) break;
+            g_showGpuIcon = !g_showGpuIcon;
+            CheckMenuItem(g_hMenu, ID_MENU_SHOW_GPU_ICON, MF_BYCOMMAND | (g_showGpuIcon ? MF_CHECKED : MF_UNCHECKED));
             UpdateIconVisibility();
             SaveMenuStateToRegistry();
             break;
@@ -1292,14 +1650,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CleanupMenuIcons();
         if (g_memoryIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidMemory);
         if (g_cpuIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidCpu);
-        g_memoryIconAdded = g_cpuIconAdded = FALSE;
+        if (g_gpuIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidGpu);
+        if (g_gpuMemIconAdded) Shell_NotifyIcon(NIM_DELETE, &g_nidGpuMem);
+        g_memoryIconAdded = g_cpuIconAdded = g_gpuIconAdded = g_gpuMemIconAdded = FALSE;
         if (g_hIconMemory) DestroyIcon(g_hIconMemory);
         if (g_hIconCpu) DestroyIcon(g_hIconCpu);
-        if (g_hMenu) DestroyMenu(g_hMenu);      // also destroys the submenus
+        if (g_hIconGpu) DestroyIcon(g_hIconGpu);
+        if (g_hIconGpuMem) DestroyIcon(g_hIconGpuMem);
+        g_hIconMemory = g_hIconCpu = g_hIconGpu = g_hIconGpuMem = NULL;
+        if (g_hMenu) DestroyMenu(g_hMenu);
         if (g_pdhQuery) {
             PdhCloseQuery(g_pdhQuery);
             g_pdhQuery = NULL;
         }
+        g_gpuEngineWild = g_gpuDedWild = g_gpuShaWild = NULL;
         free(g_pieAngles);
         free(g_pieFeather);
         g_pieAngles = NULL;
@@ -1317,7 +1681,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-// Application entry point
 int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow) {
     SetLastError(ERROR_SUCCESS);
     g_hSingleInstanceEvent = CreateEvent(NULL, TRUE, FALSE, _T("ResourceMonitorEvent"));
@@ -1333,12 +1696,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     }
 
     g_hInst = hInstance;
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };   // trackbar in the refresh dialog
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
     screenWidth = GetSystemMetrics(SM_CXSCREEN);
     screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
-    // Initialize window class
     WNDCLASSEX wcex = { sizeof(WNDCLASSEX), CS_HREDRAW | CS_VREDRAW, WndProc, 0, 0, hInstance, NULL, NULL,
                         (HBRUSH)(COLOR_WINDOW+1), NULL, _T("TrayAppClass"), NULL };
     if (!RegisterClassEx(&wcex)) {
@@ -1358,12 +1720,10 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     UpdateWindow(g_hWnd);
     g_taskbarCreatedMessage = RegisterWindowMessage(_T("TaskbarCreated"));
 
-    // Get CPU core count
     SYSTEM_INFO sysInfo;
     GetSystemInfo(&sysInfo);
     g_coreCount = min(sysInfo.dwNumberOfProcessors, MAX_CORES);
 
-    // Initialize system tray menu
     g_hMenu = CreatePopupMenu();
     AppendMenu(g_hMenu, MF_STRING, ID_MENU_ABOUT, g_lang->menu_about);
     AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
@@ -1379,7 +1739,6 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     }
     AppendMenu(g_hMenu, MF_SEPARATOR, 0, NULL);
 
-    // CPU Display mode submenu
     g_hCpuDisplayMenu = CreatePopupMenu();
     AppendMenu(g_hCpuDisplayMenu, MF_STRING | MF_CHECKED, ID_MENU_CPU_SHOW_ALL, g_lang->menu_cpu_show_all);
     AppendMenu(g_hCpuDisplayMenu, MF_STRING, ID_MENU_CPU_SHOW_AVG, g_lang->menu_cpu_show_avg);
@@ -1389,6 +1748,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_AUTOSTART, g_lang->menu_autostart);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_MEMORY_ICON, g_lang->menu_show_memory_icon);
     AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_CPU_ICON, g_lang->menu_show_cpu_icon);
+    AppendMenu(g_hMenu, MF_STRING | MF_CHECKED, ID_MENU_SHOW_GPU_ICON, g_lang->menu_show_gpu_icon);
     AppendMenu(g_hMenu, MF_STRING, ID_MENU_REFRESH_INTERVAL, g_lang->menu_refresh_interval);
     g_hLangMenu = CreatePopupMenu();
     AppendMenu(g_hLangMenu, MF_STRING, ID_MENU_LANG_EN, _T("English"));
@@ -1404,7 +1764,6 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
 
     InitializeMenuWithIcons();
 
-    // Initialize system tray icons
     g_nidMemory.cbSize = sizeof(NOTIFYICONDATA);
     g_nidMemory.hWnd = g_hWnd;
     g_nidMemory.uID = 1;
@@ -1423,8 +1782,24 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     g_hIconCpu = CopyIcon(LoadIcon(NULL, IDI_APPLICATION));
     g_nidCpu.hIcon = g_hIconCpu;
 
-    // Initialize PDH counters. Every counter addition is checked; individual
-    // counters may be unavailable even when the query itself is valid.
+    g_nidGpu.cbSize = sizeof(NOTIFYICONDATA);
+    g_nidGpu.hWnd = g_hWnd;
+    g_nidGpu.uID = 3;
+    g_nidGpu.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_nidGpu.uCallbackMessage = WM_TRAYICON;
+    StringCchCopy(g_nidGpu.szTip, sizeof(g_nidGpu.szTip)/sizeof(TCHAR), g_lang->tooltip_gpu_usage);
+    g_hIconGpu = CopyIcon(LoadIcon(NULL, IDI_APPLICATION));
+    g_nidGpu.hIcon = g_hIconGpu;
+
+    g_nidGpuMem.cbSize = sizeof(NOTIFYICONDATA);
+    g_nidGpuMem.hWnd = g_hWnd;
+    g_nidGpuMem.uID = 4;
+    g_nidGpuMem.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_nidGpuMem.uCallbackMessage = WM_TRAYICON;
+    StringCchCopy(g_nidGpuMem.szTip, sizeof(g_nidGpuMem.szTip)/sizeof(TCHAR), g_lang->tooltip_gpu_mem_usage);
+    g_hIconGpuMem = CopyIcon(LoadIcon(NULL, IDI_APPLICATION));
+    g_nidGpuMem.hIcon = g_hIconGpuMem;
+
     if (PdhOpenQuery(NULL, 0, &g_pdhQuery) == ERROR_SUCCESS) {
         for (int i = 0; i < CACHE_COUNTERS; i++) {
             if (PdhAddEnglishCounter(g_pdhQuery, kCachePaths[i], 0,
@@ -1445,10 +1820,12 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
             if (PdhAddEnglishCounter(g_pdhQuery, path, 0, &g_pdhCountersCpu[i]) != ERROR_SUCCESS)
                 g_pdhCountersCpu[i] = NULL;
         }
-        PdhCollectQueryData(g_pdhQuery);  // prime rate counters
+        PdhCollectQueryData(g_pdhQuery);
     } else {
         g_pdhQuery = NULL;
     }
+
+    InitGpuCounters();
 
     if (!LoadLanguageSelectionFromRegistry()) {
         LANGID langId = GetUserDefaultUILanguage();
@@ -1480,12 +1857,8 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     CheckMenuItem(g_hCpuDisplayMenu, ID_MENU_CPU_SHOW_MAX, MF_BYCOMMAND | (g_cpuDisplayMode == CPU_DISPLAY_MODE_MAX ? MF_CHECKED : MF_UNCHECKED));
     UpdateIconVisibility();
 
-    // First refresh immediately instead of waiting one full interval: the
-    // tray icons, menu and the PDH baseline sample above are all ready, so
-    // the default icon is replaced right away (e.g. no 5 s blank at 5 s).
     SendMessage(g_hWnd, WM_TIMER, 1, 0);
 
-    // Main message loop
     MSG msg;
     int messageResult;
     while ((messageResult = GetMessage(&msg, NULL, 0, 0)) > 0) {
