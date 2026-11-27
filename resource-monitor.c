@@ -232,7 +232,7 @@ static LANG lang_it = {
     _T("Visualizza icona memoria"),
     _T("Visualizza icona CPU"),
     _T("Visualizza icona GPU"),
-    _T("Utilizzo GPU: %.1f%%"),
+    _T("Uso GPU: %.1f%%"),
     _T("Memoria GPU: %.1f%%"),
     _T("Intervallo aggiornamento..."),
     _T("Intervallo aggiornamento"),
